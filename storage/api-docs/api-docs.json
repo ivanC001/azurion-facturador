@@ -1,0 +1,119 @@
+{
+    "openapi": "3.0.0",
+    "info": {
+        "title": "AZURION FACTURADOR API",
+        "description": "Motor SaaS multi-tenant de facturacion electronica SUNAT",
+        "version": "1.0.0"
+    },
+    "paths": {
+        "/documentos": {
+            "post": {
+                "tags": [
+                    "Documentos"
+                ],
+                "summary": "Registrar factura/boleta para procesamiento async SUNAT",
+                "operationId": "84ca051c53a6bdba4a05e23a82166752",
+                "responses": {
+                    "202": {
+                        "description": "Documento encolado"
+                    },
+                    "422": {
+                        "description": "Validacion fallida"
+                    }
+                },
+                "security": [
+                    {
+                        "bearerAuth": []
+                    },
+                    {
+                        "apiKeyAuth": []
+                    }
+                ]
+            },
+            "servers": [
+                {
+                    "url": "/api",
+                    "description": "API base"
+                }
+            ]
+        },
+        "/sunat/enviar": {
+            "post": {
+                "tags": [
+                    "Sunat"
+                ],
+                "summary": "Reencolar envio SUNAT",
+                "operationId": "6a13008872604c809e12793f4b94018a",
+                "responses": {
+                    "202": {
+                        "description": "Solicitud en cola"
+                    }
+                },
+                "security": [
+                    {
+                        "bearerAuth": []
+                    },
+                    {
+                        "apiKeyAuth": []
+                    }
+                ]
+            }
+        },
+        "/sunat/estado": {
+            "get": {
+                "tags": [
+                    "Sunat"
+                ],
+                "summary": "Consultar estado SUNAT por documento_id",
+                "operationId": "36e97749b16952a2da2a911ccfc916e0",
+                "parameters": [
+                    {
+                        "name": "documento_id",
+                        "in": "query",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Estado actual"
+                    }
+                },
+                "security": [
+                    {
+                        "bearerAuth": []
+                    },
+                    {
+                        "apiKeyAuth": []
+                    }
+                ]
+            }
+        }
+    },
+    "components": {
+        "securitySchemes": {
+            "bearerAuth": {
+                "type": "http",
+                "bearerFormat": "JWT",
+                "scheme": "bearer"
+            },
+            "apiKeyAuth": {
+                "type": "apiKey",
+                "name": "X-API-Key",
+                "in": "header"
+            }
+        }
+    },
+    "tags": [
+        {
+            "name": "Documentos",
+            "description": "Documentos"
+        },
+        {
+            "name": "Sunat",
+            "description": "Sunat"
+        }
+    ]
+}
