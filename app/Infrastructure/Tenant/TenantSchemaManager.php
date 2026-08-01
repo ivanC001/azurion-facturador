@@ -116,6 +116,7 @@ final class TenantSchemaManager
         DB::statement(sprintf('ALTER TABLE "%s"."configuracion_facturacion" ADD COLUMN IF NOT EXISTS igv NUMERIC(8,2)', $schema));
         DB::statement(sprintf('ALTER TABLE "%s"."configuracion_facturacion" ADD COLUMN IF NOT EXISTS moneda VARCHAR(3)', $schema));
         DB::statement(sprintf('ALTER TABLE "%s"."configuracion_facturacion" ADD COLUMN IF NOT EXISTS token_api VARCHAR(255)', $schema));
+        DB::statement(sprintf('UPDATE "%s"."configuracion_facturacion" SET certificado_password = NULL WHERE certificado_password IS NOT NULL', $schema));
 
         DB::statement(sprintf('ALTER TABLE "%s"."sucursales" ADD COLUMN IF NOT EXISTS codigo VARCHAR(30)', $schema));
         DB::statement(sprintf('ALTER TABLE "%s"."sucursales" ADD COLUMN IF NOT EXISTS numero INTEGER', $schema));

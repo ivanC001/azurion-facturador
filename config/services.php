@@ -37,6 +37,8 @@ return [
     'sunat' => [
         'beta_url' => env('SUNAT_BETA_URL', 'https://e-beta.sunat.gob.pe/ol-ti-itcpfegem-beta/billService'),
         'production_url' => env('SUNAT_PROD_URL', 'https://e-factura.sunat.gob.pe/ol-ti-itcpfegem/billService'),
+        'guia_beta_url' => env('SUNAT_GUIA_BETA_URL', 'https://e-beta.sunat.gob.pe/ol-ti-itemision-guia-gem-beta/billService'),
+        'guia_production_url' => env('SUNAT_GUIA_PROD_URL', 'https://e-guiaremision.sunat.gob.pe/ol-ti-itemision-guia-gem/billService'),
         'timeout' => (int) env('SUNAT_TIMEOUT', 30),
     ],
 

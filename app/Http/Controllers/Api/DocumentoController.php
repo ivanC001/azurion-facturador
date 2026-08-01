@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Application\Documentos\DTOs\DocumentoPayloadData;
 use App\Application\Documentos\Services\DocumentoTaxPayloadValidator;
+use App\Application\Documentos\Services\DocumentEmissionPolicy;
 use App\Application\Documentos\UseCases\CreateDocumentoUseCase;
 use App\Application\Documentos\UseCases\GetDocumentoUseCase;
 use App\Application\Documentos\UseCases\ListDocumentosUseCase;
@@ -17,6 +18,8 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\URL;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 final class DocumentoController
@@ -29,6 +32,7 @@ final class DocumentoController
         private readonly TenantStoragePathResolver $storagePathResolver,
         private readonly UbigeoCatalog $ubigeoCatalog,
         private readonly DocumentoTaxPayloadValidator $documentTaxPayloadValidator,
+        private readonly DocumentEmissionPolicy $documentEmissionPolicy,
     ) {
     }
 
@@ -57,9 +61,8 @@ final class DocumentoController
             'limit' => (int) ($data['limit'] ?? 100),
         ]);
 
-        $base = rtrim(config('app.url'), '/');
         $includeArtifacts = (bool) ($data['include_artifacts'] ?? false);
-        $items = array_map(function (array $item) use ($base, $includeArtifacts): array {
+        $items = array_map(function (array $item) use ($includeArtifacts): array {
             $id = (int) ($item['id'] ?? 0);
             $ruc = (string) ($item['empresa_ruc'] ?? '00000000000');
             $tipo = (string) ($item['tipo_documento'] ?? '01');
@@ -67,27 +70,25 @@ final class DocumentoController
             $correlativo = (string) ($item['correlativo'] ?? '1');
             $baseName = sprintf('%s-%s-%s-%s', $ruc, $tipo, $serie, $correlativo);
             $isTicket = strtoupper($tipo) === 'TK';
-            $query = '?tenant_ruc='.urlencode($ruc);
-
             if (! $includeArtifacts) {
                 return array_merge($item, [
-                    'pdf_url' => $id > 0 ? $base.'/api/documentos/'.$id.'/pdf'.$query : null,
-                    'xml_url' => ($id > 0 && ! $isTicket) ? $base.'/api/documentos/'.$id.'/xml'.$query : null,
-                    'cdr_url' => ($id > 0 && ! $isTicket) ? $base.'/api/documentos/'.$id.'/cdr'.$query : null,
+                    'pdf_url' => $id > 0 ? $this->signedArtifactUrl('documentos.pdf', $id, $ruc) : null,
+                    'xml_url' => ($id > 0 && ! $isTicket) ? $this->signedArtifactUrl('documentos.xml', $id, $ruc) : null,
+                    'cdr_url' => ($id > 0 && ! $isTicket) ? $this->signedArtifactUrl('documentos.cdr', $id, $ruc) : null,
                     'has_pdf' => null,
                     'has_xml' => null,
                     'has_cdr' => null,
                 ]);
             }
 
-            $pdfExists = Storage::disk('tenants')->exists($this->storagePathResolver->pdfPath($baseName.'.pdf'));
-            $xmlExists = ! $isTicket && Storage::disk('tenants')->exists($this->storagePathResolver->xmlPath($baseName.'.xml'));
-            $cdrExists = ! $isTicket && Storage::disk('tenants')->exists($this->storagePathResolver->cdrPath('R-'.$baseName.'.zip'));
+            $pdfExists = Storage::disk(config('facturador.storage.disk', 'tenants'))->exists($this->storagePathResolver->pdfPath($baseName.'.pdf'));
+            $xmlExists = ! $isTicket && Storage::disk(config('facturador.storage.disk', 'tenants'))->exists($this->storagePathResolver->xmlPath($baseName.'.xml'));
+            $cdrExists = ! $isTicket && Storage::disk(config('facturador.storage.disk', 'tenants'))->exists($this->storagePathResolver->cdrPath('R-'.$baseName.'.zip'));
 
             return array_merge($item, [
-                'pdf_url' => ($id > 0 && $pdfExists) ? $base.'/api/documentos/'.$id.'/pdf'.$query : null,
-                'xml_url' => ($id > 0 && $xmlExists) ? $base.'/api/documentos/'.$id.'/xml'.$query : null,
-                'cdr_url' => ($id > 0 && $cdrExists) ? $base.'/api/documentos/'.$id.'/cdr'.$query : null,
+                'pdf_url' => ($id > 0 && $pdfExists) ? $this->signedArtifactUrl('documentos.pdf', $id, $ruc) : null,
+                'xml_url' => ($id > 0 && $xmlExists) ? $this->signedArtifactUrl('documentos.xml', $id, $ruc) : null,
+                'cdr_url' => ($id > 0 && $cdrExists) ? $this->signedArtifactUrl('documentos.cdr', $id, $ruc) : null,
                 'has_pdf' => $pdfExists,
                 'has_xml' => $xmlExists,
                 'has_cdr' => $cdrExists,
@@ -146,18 +147,16 @@ final class DocumentoController
             $documento['correlativo'],
         );
         $isTicket = strtoupper((string) $documento['tipo_documento']) === 'TK';
-        $xmlExists = ! $isTicket && Storage::disk('tenants')->exists($this->storagePathResolver->xmlPath($baseName.'.xml'));
-        $pdfExists = Storage::disk('tenants')->exists($this->storagePathResolver->pdfPath($baseName.'.pdf'));
-        $cdrExists = ! $isTicket && Storage::disk('tenants')->exists($this->storagePathResolver->cdrPath('R-'.$baseName.'.zip'));
+        $xmlExists = ! $isTicket && Storage::disk(config('facturador.storage.disk', 'tenants'))->exists($this->storagePathResolver->xmlPath($baseName.'.xml'));
+        $pdfExists = Storage::disk(config('facturador.storage.disk', 'tenants'))->exists($this->storagePathResolver->pdfPath($baseName.'.pdf'));
+        $cdrExists = ! $isTicket && Storage::disk(config('facturador.storage.disk', 'tenants'))->exists($this->storagePathResolver->cdrPath('R-'.$baseName.'.zip'));
 
-        $base = rtrim(config('app.url'), '/');
         $ruc = (string) data_get($documento, 'payload.empresa.ruc', '00000000000');
-        $query = '?tenant_ruc='.urlencode($ruc);
 
         return ApiResponse::success(array_merge($documento, [
-            'pdf_url' => $base.'/api/documentos/'.$id.'/pdf'.$query,
-            'xml_url' => $isTicket ? null : $base.'/api/documentos/'.$id.'/xml'.$query,
-            'cdr_url' => $isTicket ? null : $base.'/api/documentos/'.$id.'/cdr'.$query,
+            'pdf_url' => $this->signedArtifactUrl('documentos.pdf', $id, $ruc),
+            'xml_url' => $isTicket ? null : $this->signedArtifactUrl('documentos.xml', $id, $ruc),
+            'cdr_url' => $isTicket ? null : $this->signedArtifactUrl('documentos.cdr', $id, $ruc),
             'has_pdf' => $pdfExists,
             'has_xml' => $xmlExists,
             'has_cdr' => $cdrExists,
@@ -181,6 +180,8 @@ final class DocumentoController
 
     private function createFromRequest(Request $request, string $tipo): JsonResponse
     {
+        $this->documentEmissionPolicy->assertAllowed($tipo);
+
         $data = $request->validate([
             'empresa' => ['required', 'array'],
             'cliente' => [$tipo === 'TK' ? 'nullable' : 'required', 'array'],
@@ -237,6 +238,15 @@ final class DocumentoController
         return ($result['sunat_async'] ?? false)
             ? ApiResponse::accepted($response)
             : ApiResponse::success($response, 201);
+    }
+
+    private function signedArtifactUrl(string $routeName, int $documentId, string $ruc): string
+    {
+        return URL::temporarySignedRoute(
+            $routeName,
+            now()->addMinutes(30),
+            ['id' => $documentId, 'tenant_ruc' => $ruc],
+        );
     }
 
     private function applySalesDocumentRules(array $data, string $tipo): array
@@ -420,38 +430,49 @@ final class DocumentoController
             $this->generatePdfOnDemand($documento, $primaryPath);
         }
 
-        $path = Storage::disk('tenants')->exists($primaryPath)
+        $path = Storage::disk(config('facturador.storage.disk', 'tenants'))->exists($primaryPath)
             ? $primaryPath
             : $legacyPath;
 
-        abort_unless(Storage::disk('tenants')->exists($path), 404, strtoupper($type).' not generated yet.');
+        abort_unless(Storage::disk(config('facturador.storage.disk', 'tenants'))->exists($path), 404, strtoupper($type).' not generated yet.');
 
-        return Storage::disk('tenants')->download($path, basename($path), [
+        return Storage::disk(config('facturador.storage.disk', 'tenants'))->download($path, basename($path), [
             'Content-Type' => $contentType,
         ]);
     }
 
     private function generatePdfOnDemand(array $documento, string $targetPath): void
     {
+        $disk = Storage::disk(config('facturador.storage.disk', 'tenants'));
+        if ($disk->exists($targetPath)) {
+            return;
+        }
+
         try {
-            $payload = (array) data_get($documento, 'payload', []);
-            $documentoPayload = (array) data_get($payload, 'documento', []);
-            $documentoPayload['tipo'] = (string) data_get($documento, 'tipo_documento', $documentoPayload['tipo'] ?? '01');
-            $documentoPayload['serie'] = (string) data_get($documento, 'serie', $documentoPayload['serie'] ?? '');
-            $documentoPayload['correlativo'] = (string) data_get($documento, 'correlativo', $documentoPayload['correlativo'] ?? '');
+            Cache::lock('pdf-generation:'.hash('sha256', $targetPath), 60)->block(15, function () use ($disk, $documento, $targetPath): void {
+                if ($disk->exists($targetPath)) {
+                    return;
+                }
 
-            $pdfContext = [
-                'estado' => (string) data_get($documento, 'estado', 'REGISTRADO'),
-                'hash' => data_get($documento, 'hash'),
-                'mensaje' => $this->buildPdfMessage($documento),
-                'empresa' => $this->withTenantBillingLogo((array) data_get($payload, 'empresa', [])),
-                'cliente' => (array) data_get($payload, 'cliente', []),
-                'documento' => $documentoPayload,
-                'detalles' => (array) data_get($payload, 'detalles', []),
-            ];
+                $payload = (array) data_get($documento, 'payload', []);
+                $documentoPayload = (array) data_get($payload, 'documento', []);
+                $documentoPayload['tipo'] = (string) data_get($documento, 'tipo_documento', $documentoPayload['tipo'] ?? '01');
+                $documentoPayload['serie'] = (string) data_get($documento, 'serie', $documentoPayload['serie'] ?? '');
+                $documentoPayload['correlativo'] = (string) data_get($documento, 'correlativo', $documentoPayload['correlativo'] ?? '');
 
-            $pdfBinary = $this->documentPdfGenerator->generate($pdfContext);
-            Storage::disk('tenants')->put($targetPath, $pdfBinary);
+                $pdfContext = [
+                    'estado' => (string) data_get($documento, 'estado', 'REGISTRADO'),
+                    'hash' => data_get($documento, 'hash'),
+                    'mensaje' => $this->buildPdfMessage($documento),
+                    'empresa' => $this->withTenantBillingLogo((array) data_get($payload, 'empresa', [])),
+                    'cliente' => (array) data_get($payload, 'cliente', []),
+                    'documento' => $documentoPayload,
+                    'detalles' => (array) data_get($payload, 'detalles', []),
+                ];
+
+                $pdfBinary = $this->documentPdfGenerator->generate($pdfContext);
+                $disk->put($targetPath, $pdfBinary);
+            });
         } catch (\Throwable $exception) {
             Log::warning('No se pudo generar PDF on-demand.', [
                 'documento_id' => $documento['id'] ?? null,

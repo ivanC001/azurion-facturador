@@ -17,6 +17,8 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->alias([
             'auth.api' => App\Http\Middleware\ApiAuthenticationMiddleware::class,
+            'azurion.integration' => App\Http\Middleware\RequireAzurionIntegrationMiddleware::class,
+            'facturador.management' => App\Http\Middleware\RequireFacturadorManagementMiddleware::class,
             'resolve.tenant' => App\Http\Middleware\ResolveTenantMiddleware::class,
             'tenant.search_path' => App\Http\Middleware\SetTenantSearchPathMiddleware::class,
         ]);

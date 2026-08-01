@@ -64,40 +64,92 @@ Cada tenant contiene tablas operativas de facturacion, almacenamiento, SUNAT y a
 - Middleware `resolve.tenant`
 - Middleware `tenant.search_path`
 - Rate limiting por cliente/IP
-- Para integracion servidor-servidor con API Key, se exige firma HMAC SHA-256 (configurable por `.env`)
+- Para integracion servidor-servidor se exige firma HMAC SHA-256 con identidad
+  de cliente, timestamp y nonce.
 
-### API Key + HMAC (server-to-server)
+### Client ID + HMAC v2 (server-to-server)
 
-Headers requeridos cuando autenticas con `X-API-Key`:
+Headers requeridos para Azurion:
 
-- `X-API-Key`
+- `X-Client-Id`
+- `X-Signature-Version: v2`
 - `X-Timestamp` (unix seconds o ms)
 - `X-Nonce` (unico por request)
 - `X-Signature` (base64 o hex)
+- `X-Azurion-Tenant-ID`
+- `X-Tenant-RUC` cuando exista identificador fiscal
 
 String canonica a firmar:
 
 ```text
+v2\n
 {METHOD}\n
 {REQUEST_URI}\n
 {X-Timestamp}\n
 {X-Nonce}\n
+{X-Azurion-Tenant-ID}\n
+{X-Tenant-RUC}\n
 {SHA256_BODY_HEX}
 ```
 
 Firma:
 
 ```text
-HMAC_SHA256(canonical_string, api_key)
+HMAC_SHA256(canonical_string, client_secret)
 ```
 
-Respuesta esperada en caso de error de firma: `401`.
+El secreto nunca se envia. El facturador selecciona el secreto usando el
+`X-Client-Id`. `AZURION_INTEGRATION_PREVIOUS_SECRET` permite una rotacion sin
+caida: primero se publica el secreto nuevo en el facturador, luego en Azurion y
+finalmente se elimina el anterior.
+
+Las API keys antiguas de clientes tenant continúan usando HMAC v1 durante la
+migracion. La integración global heredada solo se habilita explícitamente con
+`AZURION_INTEGRATION_ALLOW_LEGACY_API_KEY=true`.
+
+Respuesta esperada en caso de identidad o firma inválida: `401`.
 
 ### Restriccion para modo production
 
 - En `sunat_mode=production` el endpoint de tenants exige `certificado_file`.
 - Formatos permitidos por backend: `pem`, `pfx`, `p12`.
 - Sin archivo de firma digital, la API responde `422`.
+
+### Entornos SUNAT y colas
+
+El destino se decide por tenant mediante `public.tenants.sunat_mode`; no existe un modo global para todas las empresas.
+
+- `beta`: usa automaticamente `20000000001 / MODDATOS`, la clave y el certificado de prueba incluidos en el servidor. Facturas y boletas se envian a `SUNAT_BETA_URL` mediante la cola `SUNAT_BETA_QUEUE`.
+- `production`: usa exclusivamente las credenciales SOL y el certificado real guardados para el tenant. Facturas y boletas se envian a `SUNAT_PROD_URL` mediante la cola `SUNAT_PRODUCTION_QUEUE`.
+- Las guias usan sus endpoints separados `SUNAT_GUIA_BETA_URL` y `SUNAT_GUIA_PROD_URL`.
+
+Valores recomendados para las colas:
+
+```dotenv
+SUNAT_BETA_QUEUE=sunat-beta
+SUNAT_PRODUCTION_QUEUE=sunat-production
+```
+
+Un worker puede atender ambas colas con:
+
+```bash
+php artisan queue:work --queue=sunat-production,sunat-beta,default
+```
+
+Cada envio registra entorno, endpoint, cola, estado y codigo SUNAT en `storage/logs/sunat-AAAA-MM-DD.log`, sin escribir claves ni certificados.
+
+### Escalado horizontal y archivos
+
+`TENANT_STORAGE_DISK` debe apuntar a almacenamiento compartido y persistente si
+se ejecuta mas de una replica (volumen RWX u object storage compatible). No uses
+un directorio local distinto por contenedor: el worker que genera PDF/XML/CDR y
+la replica que atiende la descarga pueden no ser la misma. Redis tambien debe
+ser compartido porque coordina colas, nonces y bloqueos de generacion de PDF.
+
+El `retry_after` de Redis debe ser mayor que el timeout del job SUNAT. La
+configuracion incluida usa 180 segundos frente a 120 segundos de ejecucion para
+evitar que un segundo worker tome el mismo documento mientras el primero sigue
+procesandolo.
 
 ### Ubigeo, IGV y fecha de emision
 

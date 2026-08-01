@@ -9,6 +9,9 @@ final class TenantIdentity
         public readonly string $ruc,
         public readonly string $schema,
         public readonly string $sunatMode,
+        public readonly string $countryCode,
+        public readonly string $documentMode,
+        public readonly string $fiscalStatus,
     ) {
     }
 }

@@ -5,13 +5,19 @@ namespace App\Application\Integrations\Azurion;
 use App\Models\Documento;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\URL;
 use Illuminate\Support\Str;
 
 final class AzurionVentaStatusNotifier
 {
+    public function isEnabled(): bool
+    {
+        return (bool) config('facturador.integrations.azurion.enabled', false);
+    }
+
     public function notify(Documento $documento): bool
     {
-        if (! (bool) config('facturador.integrations.azurion.enabled', false)) {
+        if (! $this->isEnabled()) {
             return false;
         }
 
@@ -120,10 +126,9 @@ final class AzurionVentaStatusNotifier
     private function buildPayload(Documento $documento): array
     {
         $documentoId = (int) $documento->id;
-        $baseUrl = rtrim((string) config('app.url'), '/');
         $externalId = trim((string) data_get($documento->payload, 'documento.external_id', ''));
         $empresaRuc = trim((string) data_get($documento->empresa, 'ruc', data_get($documento->payload, 'empresa.ruc', '')));
-        $query = '?tenant_ruc='.urlencode($empresaRuc !== '' ? $empresaRuc : '00000000000');
+        $tenantRuc = $empresaRuc !== '' ? $empresaRuc : '00000000000';
         $isTicket = strtoupper((string) $documento->tipo_documento) === 'TK';
 
         return [
@@ -140,9 +145,9 @@ final class AzurionVentaStatusNotifier
             'sunatMensaje' => $this->normalizeString($documento->sunat?->mensaje),
             'ticket' => $this->normalizeString($documento->ticket),
             'hash' => $this->normalizeString($documento->hash),
-            'pdfUrl' => $documentoId > 0 ? $baseUrl.'/api/documentos/'.$documentoId.'/pdf'.$query : null,
-            'xmlUrl' => ($documentoId > 0 && ! $isTicket) ? $baseUrl.'/api/documentos/'.$documentoId.'/xml'.$query : null,
-            'cdrUrl' => ($documentoId > 0 && ! $isTicket) ? $baseUrl.'/api/documentos/'.$documentoId.'/cdr'.$query : null,
+            'pdfUrl' => $documentoId > 0 ? $this->signedArtifactUrl('documentos.pdf', $documentoId, $tenantRuc) : null,
+            'xmlUrl' => ($documentoId > 0 && ! $isTicket) ? $this->signedArtifactUrl('documentos.xml', $documentoId, $tenantRuc) : null,
+            'cdrUrl' => ($documentoId > 0 && ! $isTicket) ? $this->signedArtifactUrl('documentos.cdr', $documentoId, $tenantRuc) : null,
             'updatedAt' => now()->toIso8601String(),
             'documento' => [
                 'id' => $documentoId,
@@ -158,6 +163,15 @@ final class AzurionVentaStatusNotifier
                 'ticket' => $this->normalizeString($documento->ticket),
             ],
         ];
+    }
+
+    private function signedArtifactUrl(string $routeName, int $documentId, string $tenantRuc): string
+    {
+        return URL::temporarySignedRoute(
+            $routeName,
+            now()->addMinutes(max(5, (int) config('facturador.artifacts.signed_url_ttl_minutes', 30))),
+            ['id' => $documentId, 'tenant_ruc' => $tenantRuc],
+        );
     }
 
     private function resolveRequestUri(string $callbackUrl): string

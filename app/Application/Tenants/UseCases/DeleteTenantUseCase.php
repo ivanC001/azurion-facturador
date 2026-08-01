@@ -19,6 +19,9 @@ final class DeleteTenantUseCase
             ->update(['is_active' => false]);
         Cache::forget('facturador:tenant:id:'.$tenant->id);
         Cache::forget('facturador:tenant:ruc:'.$tenant->ruc);
+        if ($tenant->external_tenant_id) {
+            Cache::forget('facturador:tenant:external:'.$tenant->external_tenant_id);
+        }
 
         return [
             'tenant_id' => $tenant->id,

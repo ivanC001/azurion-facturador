@@ -79,6 +79,9 @@
     },
     "config": {
         "optimize-autoloader": true,
+        "platform": {
+            "php": "8.3.0"
+        },
         "platform-check": false,
         "preferred-install": "dist",
         "sort-packages": true,

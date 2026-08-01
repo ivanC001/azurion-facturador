@@ -3,6 +3,8 @@
 namespace App\Application\Tenants\UseCases;
 
 use App\Models\Tenant;
+use App\Support\Sunat\SunatEnvironment;
+use App\Support\Tenants\TenantPrivateFileReference;
 use Greenter\XMLSecLibs\Certificate\X509Certificate;
 use Greenter\XMLSecLibs\Certificate\X509ContentType;
 use Illuminate\Http\UploadedFile;
@@ -26,20 +28,35 @@ final class UpdateTenantUseCase
 
         $tenantChanges = [];
 
-        if (array_key_exists('business_name', $payload)) {
-            $tenantChanges['business_name'] = $payload['business_name'];
-        }
         if (array_key_exists('sunat_mode', $payload)) {
             $tenantChanges['sunat_mode'] = $payload['sunat_mode'];
         }
-        if (array_key_exists('is_active', $payload)) {
-            $tenantChanges['is_active'] = (bool) $payload['is_active'];
+
+        $targetSunatMode = (string) ($payload['sunat_mode'] ?? $tenant->sunat_mode ?: Tenant::SUNAT_MODE_DISABLED);
+        $configChanges = $this->buildConfigChanges($tenant->ruc, $payload, $targetSunatMode);
+
+        $this->assertProductionConfig(
+            (string) $tenant->ruc,
+            $targetSunatMode,
+            $currentConfig,
+            $payload,
+            $configChanges,
+        );
+        if ($targetSunatMode !== Tenant::SUNAT_MODE_DISABLED
+            && strtoupper((string) ($payload['country_code'] ?? $tenant->country_code)) !== 'PE') {
+            throw ValidationException::withMessages([
+                'country_code' => ['La facturacion electronica SUNAT solo puede activarse para empresas de Peru.'],
+            ]);
         }
 
-        $configChanges = $this->buildConfigChanges($tenant->ruc, $payload);
-        $targetSunatMode = (string) ($payload['sunat_mode'] ?? $tenant->sunat_mode ?: 'beta');
-
-        $this->assertProductionConfig($targetSunatMode, $currentConfig, $payload, $configChanges);
+        if (array_key_exists('sunat_mode', $payload)) {
+            $tenantChanges['document_mode'] = $targetSunatMode === Tenant::SUNAT_MODE_DISABLED
+                ? Tenant::DOCUMENT_MODE_TICKET_ONLY
+                : Tenant::DOCUMENT_MODE_ELECTRONIC;
+            $tenantChanges['fiscal_status'] = $targetSunatMode === Tenant::SUNAT_MODE_DISABLED
+                ? Tenant::FISCAL_STATUS_NOT_CONFIGURED
+                : Tenant::FISCAL_STATUS_ACTIVE;
+        }
 
         if ($tenantChanges !== []) {
             $tenant->fill($tenantChanges)->save();
@@ -55,15 +72,9 @@ final class UpdateTenantUseCase
             );
         }
         $this->forgetTenantCache($tenant->id, $tenant->ruc);
-
-        $tokenApi = null;
-        if (preg_match('/^[a-zA-Z0-9_]+$/', $schema)) {
-            try {
-                $tokenApi = DB::table($schema.'.configuracion_facturacion')->value('token_api');
-            } catch (\Throwable) {
-                $tokenApi = null;
-            }
-        }
+        $savedConfig = $this->readBillingConfig($schema);
+        $environment = SunatEnvironment::describe((string) $tenant->sunat_mode);
+        $usesTestData = (bool) $environment['usa_datos_prueba'];
 
         return [
             'tenant_id' => $tenant->id,
@@ -71,9 +82,42 @@ final class UpdateTenantUseCase
             'business_name' => $tenant->business_name,
             'schema' => $tenant->schema_name,
             'sunat_mode' => $tenant->sunat_mode,
+            'external_tenant_id' => $tenant->external_tenant_id,
+            'country_code' => $tenant->country_code,
+            'tax_id' => $tenant->tax_id,
+            'document_mode' => $tenant->document_mode,
+            'fiscal_status' => $tenant->fiscal_status,
+            'ticket_enabled' => (bool) $tenant->is_active,
+            'electronic_documents_enabled' => $tenant->allowsElectronicDocuments(),
             'is_active' => (bool) $tenant->is_active,
-            'api_key' => $tokenApi,
+            'api_key' => null,
             'updated' => true,
+            'entorno_sunat' => $environment,
+            'configuracion' => [
+                'ruc_sol' => $usesTestData ? self::TEST_SOL_RUC : ($savedConfig->ruc_sol ?? null),
+                'usuario_sol' => $usesTestData ? self::TEST_SOL_USER : ($savedConfig->usuario_sol ?? null),
+                'modo_sunat' => $tenant->sunat_mode,
+                'usa_datos_prueba' => $usesTestData,
+                'endpoint_facturacion' => $environment['endpoint_facturacion'],
+                'endpoint_guias' => $environment['endpoint_guias'],
+                'cola' => $environment['cola'],
+                'certificado_configurado' => $usesTestData
+                    ? is_file(storage_path('certificates/ejemplo123456789.pem'))
+                    : TenantPrivateFileReference::isAvailable(
+                        $tenant->ruc,
+                        'certificados',
+                        $savedConfig->certificado_url ?? null,
+                    ),
+                'certificado_produccion_configurado' => TenantPrivateFileReference::isProductionCertificateAvailable(
+                    $tenant->ruc,
+                    $savedConfig->certificado_url ?? null,
+                ),
+                'logo_pdf_configurado' => TenantPrivateFileReference::isAvailable(
+                    $tenant->ruc,
+                    'logos',
+                    $savedConfig->logo_pdf_url ?? null,
+                ),
+            ],
         ];
     }
 
@@ -81,18 +125,17 @@ final class UpdateTenantUseCase
     {
         Cache::forget('facturador:tenant:id:'.$tenantId);
         Cache::forget('facturador:tenant:ruc:'.$ruc);
+        $tenant = Tenant::query()->find($tenantId);
+        if ($tenant?->external_tenant_id) {
+            Cache::forget('facturador:tenant:external:'.$tenant->external_tenant_id);
+        }
     }
 
-    private function buildConfigChanges(string $tenantRuc, array $payload): array
+    private function buildConfigChanges(string $tenantRuc, array $payload, string $targetSunatMode): array
     {
         $changes = [];
 
         $stringFields = [
-            'ruc_sol',
-            'usuario_sol',
-            'certificado_password',
-            'certificado_url',
-            'logo_pdf_url',
             'serie_factura',
             'serie_boleta',
             'serie_nc',
@@ -115,19 +158,30 @@ final class UpdateTenantUseCase
             $changes['igv'] = $payload['igv'];
         }
 
-        if (array_key_exists('clave_sol', $payload) && is_string($payload['clave_sol']) && $payload['clave_sol'] !== '') {
-            $changes['clave_sol_encrypted'] = Crypt::encryptString($payload['clave_sol']);
+        $acceptsProductionCredentials = $targetSunatMode === Tenant::SUNAT_MODE_PRODUCTION;
+        if ($acceptsProductionCredentials) {
+            foreach (['ruc_sol', 'usuario_sol'] as $field) {
+                if (array_key_exists($field, $payload)) {
+                    $changes[$field] = $payload[$field];
+                }
+            }
+
+            if (array_key_exists('clave_sol', $payload)
+                && is_string($payload['clave_sol'])
+                && $payload['clave_sol'] !== '') {
+                $changes['clave_sol_encrypted'] = Crypt::encryptString($payload['clave_sol']);
+            }
         }
 
         if (($payload['logo_file'] ?? null) instanceof UploadedFile) {
             $ext = strtolower((string) $payload['logo_file']->getClientOriginalExtension());
             $fileName = 'logo_'.now()->format('Ymd_His').'.'.$ext;
             $relative = $tenantRuc.'/logos/'.$fileName;
-            Storage::disk('tenants')->putFileAs($tenantRuc.'/logos', $payload['logo_file'], $fileName);
+            Storage::disk(config('facturador.storage.disk', 'tenants'))->putFileAs($tenantRuc.'/logos', $payload['logo_file'], $fileName);
             $changes['logo_pdf_url'] = $relative;
         }
 
-        if (($payload['certificado_file'] ?? null) instanceof UploadedFile) {
+        if ($acceptsProductionCredentials && ($payload['certificado_file'] ?? null) instanceof UploadedFile) {
             $ext = strtolower((string) $payload['certificado_file']->getClientOriginalExtension());
             $pemContent = null;
 
@@ -141,8 +195,12 @@ final class UpdateTenantUseCase
 
             $fileName = 'cert_'.now()->format('Ymd_His').'.pem';
             $relative = $tenantRuc.'/certificados/'.$fileName;
-            Storage::disk('tenants')->put($relative, $pemContent);
+            Storage::disk(config('facturador.storage.disk', 'tenants'))->put($relative, $pemContent);
             $changes['certificado_url'] = $relative;
+            $changes['certificado_password'] = null;
+        } elseif ($acceptsProductionCredentials && array_key_exists('certificado_password', $payload)) {
+            // Nunca persistir la clave del contenedor PFX/P12.
+            $changes['certificado_password'] = null;
         }
 
         return $changes;
@@ -165,8 +223,13 @@ final class UpdateTenantUseCase
      * @param array<string, mixed> $payload
      * @param array<string, mixed> $configChanges
      */
-    private function assertProductionConfig(string $targetSunatMode, ?object $currentConfig, array $payload, array $configChanges): void
-    {
+    private function assertProductionConfig(
+        string $tenantRuc,
+        string $targetSunatMode,
+        ?object $currentConfig,
+        array $payload,
+        array $configChanges,
+    ): void {
         if ($targetSunatMode !== 'production') {
             return;
         }
@@ -198,8 +261,9 @@ final class UpdateTenantUseCase
             $messages['clave_sol'] = ['No puedes usar la clave SOL de prueba en modo production.'];
         }
 
-        if ($certificateRef === '') {
-            $messages['certificado_file'] = ['En modo production debes registrar certificado real (.pem, .pfx, .p12 o certificado_url).'];
+        if ($certificateRef === ''
+            || ! TenantPrivateFileReference::isAvailable($tenantRuc, 'certificados', $certificateRef)) {
+            $messages['certificado_file'] = ['En modo production debes cargar o conservar un certificado real (.pem, .pfx o .p12).'];
         } elseif ($this->isTestCertificateRef($certificateRef)) {
             $messages['certificado_file'] = ['No puedes usar el certificado de prueba en modo production.'];
         }
@@ -218,7 +282,7 @@ final class UpdateTenantUseCase
         try {
             return trim(Crypt::decryptString($encrypted));
         } catch (\Throwable) {
-            return trim($encrypted);
+            return '';
         }
     }
 
@@ -229,4 +293,5 @@ final class UpdateTenantUseCase
         return str_contains($normalized, 'cert_test')
             || str_contains($normalized, 'ejemplo123456789');
     }
+
 }

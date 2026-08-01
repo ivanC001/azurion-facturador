@@ -3,6 +3,8 @@
 namespace App\Infrastructure\Pdf;
 
 use App\Domain\Pdf\Contracts\DocumentPdfGenerator;
+use App\Support\Tenants\TenantContext;
+use App\Support\Tenants\TenantPrivateFileReference;
 use Illuminate\Support\Facades\Storage;
 use Luecano\NumeroALetras\NumeroALetras;
 
@@ -15,8 +17,13 @@ final class SimpleDocumentPdfGenerator implements DocumentPdfGenerator
     private const TICKET_MARGIN = 10.0;
 
     private float $currentPageHeight = self::PAGE_HEIGHT;
+    private string $currentTenantRuc = '';
     /** @var array<int, array{name: string, width: int, height: int, data: string}> */
     private array $imageXObjects = [];
+
+    public function __construct(private readonly TenantContext $tenantContext)
+    {
+    }
 
     /**
      * @param array<string, mixed> $context
@@ -65,6 +72,7 @@ final class SimpleDocumentPdfGenerator implements DocumentPdfGenerator
 
         $empresaDireccion = $this->buildEmpresaDireccion($empresa);
         $empresaRuc = $this->txt($empresa['ruc'] ?? '-');
+        $this->currentTenantRuc = trim($this->tenantContext->required()->ruc);
         $empresaRazonSocial = $this->txt($empresa['razon_social'] ?? $empresa['nombre'] ?? '-');
         $empresaComercial = $this->txt($empresa['nombre_comercial'] ?? $empresaRazonSocial);
         $empresaLogoRef = $this->txt($empresa['logo_pdf_url'] ?? $empresa['logo_url'] ?? '-');
@@ -829,17 +837,13 @@ final class SimpleDocumentPdfGenerator implements DocumentPdfGenerator
             return null;
         }
 
-        if (Storage::disk('tenants')->exists($ref)) {
-            return (string) Storage::disk('tenants')->get($ref);
+        $safeKey = TenantPrivateFileReference::safeKey($this->currentTenantRuc, 'logos', $ref);
+        if ($safeKey === null) {
+            return null;
         }
 
-        $withoutPrefix = preg_replace('#^/?tenants/#', '', $ref) ?? $ref;
-        if ($withoutPrefix !== $ref && Storage::disk('tenants')->exists($withoutPrefix)) {
-            return (string) Storage::disk('tenants')->get($withoutPrefix);
-        }
-
-        if (is_file($ref)) {
-            return (string) file_get_contents($ref);
+        if (Storage::disk(config('facturador.storage.disk', 'tenants'))->exists($safeKey)) {
+            return (string) Storage::disk(config('facturador.storage.disk', 'tenants'))->get($safeKey);
         }
 
         return null;

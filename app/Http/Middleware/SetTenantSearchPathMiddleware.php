@@ -28,6 +28,8 @@ final class SetTenantSearchPathMiddleware
         }
 
         if (! preg_match('/^[a-zA-Z0-9_]+$/', $tenant->schema)) {
+            $this->tenantContext->clear();
+
             return response()->json([
                 'success' => false,
                 'message' => 'Invalid tenant schema.',
@@ -39,7 +41,11 @@ final class SetTenantSearchPathMiddleware
         try {
             return $next($request);
         } finally {
-            $this->tenantContext->clear();
+            try {
+                DB::statement('SET search_path TO public');
+            } finally {
+                $this->tenantContext->clear();
+            }
         }
     }
 }

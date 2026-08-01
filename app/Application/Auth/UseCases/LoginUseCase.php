@@ -16,8 +16,13 @@ final class LoginUseCase
             throw new \RuntimeException('Invalid credentials.');
         }
 
+        if ($user->tenant_id !== null && (int) $user->tenant_id !== $tenantId) {
+            throw new \RuntimeException('The user does not belong to the requested tenant.');
+        }
+
         $token = JWTAuth::claims([
             'tenant_id' => $tenantId,
+            'facturador_platform_admin' => $user->tenant_id === null,
         ])->fromUser($user);
 
         return [

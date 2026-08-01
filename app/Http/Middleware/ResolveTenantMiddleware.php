@@ -32,17 +32,27 @@ final class ResolveTenantMiddleware
             ruc: $tenant->ruc,
             schema: $tenant->schema_name,
             sunatMode: $tenant->sunat_mode,
+            countryCode: $tenant->country_code,
+            documentMode: $tenant->document_mode,
+            fiscalStatus: $tenant->fiscal_status,
         ));
         $request->attributes->set('tenant_id', $tenant->id);
         $request->attributes->set('tenant_ruc', $tenant->ruc);
         $request->attributes->set('tenant_schema', $tenant->schema_name);
         $request->attributes->set('tenant_sunat_mode', $tenant->sunat_mode);
+        $request->attributes->set('tenant_country_code', $tenant->country_code);
+        $request->attributes->set('tenant_document_mode', $tenant->document_mode);
+        $request->attributes->set('tenant_fiscal_status', $tenant->fiscal_status);
 
         return $next($request);
     }
 
     private function resolveTenant(Request $request): ?Tenant
     {
+        if ($request->routeIs('documentos.pdf', 'documentos.xml', 'documentos.cdr')) {
+            return $this->resolveSignedArtifactTenant($request);
+        }
+
         $tenantId = $request->attributes->get('tenant_id');
 
         if ($tenantId !== null) {
@@ -51,6 +61,18 @@ final class ResolveTenantMiddleware
                 now()->addMinutes(10),
                 fn (): ?Tenant => Tenant::query()
                     ->whereKey($tenantId)
+                    ->where('is_active', true)
+                    ->first(),
+            );
+        }
+
+        $externalTenantId = trim((string) $request->header('X-Azurion-Tenant-ID', ''));
+        if ($externalTenantId !== '') {
+            return Cache::remember(
+                'facturador:tenant:external:'.$externalTenantId,
+                now()->addMinutes(10),
+                fn (): ?Tenant => Tenant::query()
+                    ->where('external_tenant_id', $externalTenantId)
                     ->where('is_active', true)
                     ->first(),
             );
@@ -69,6 +91,23 @@ final class ResolveTenantMiddleware
         }
 
         $ruc = trim($ruc);
+
+        return Cache::remember(
+            'facturador:tenant:ruc:'.$ruc,
+            now()->addMinutes(10),
+            fn (): ?Tenant => Tenant::query()
+                ->where('ruc', $ruc)
+                ->where('is_active', true)
+                ->first(),
+        );
+    }
+
+    private function resolveSignedArtifactTenant(Request $request): ?Tenant
+    {
+        $ruc = $request->query('tenant_ruc');
+        if (! is_string($ruc) || ! preg_match('/^[A-Za-z0-9._\/-]{3,40}$/', $ruc)) {
+            return null;
+        }
 
         return Cache::remember(
             'facturador:tenant:ruc:'.$ruc,

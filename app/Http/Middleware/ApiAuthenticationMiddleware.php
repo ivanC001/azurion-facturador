@@ -11,19 +11,98 @@ use Symfony\Component\HttpFoundation\Response;
 
 final class ApiAuthenticationMiddleware
 {
-    public function __construct(private readonly ApiHmacRequestVerifier $hmacRequestVerifier)
-    {
-    }
+    public function __construct(private readonly ApiHmacRequestVerifier $hmacRequestVerifier) {}
 
     public function handle(Request $request, Closure $next): Response
     {
         if ((bool) config('facturador.auth_disabled', false)) {
+            if (! app()->environment(['local', 'testing'])) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Unsafe authentication configuration.',
+                ], 503);
+            }
+
+            return $next($request);
+        }
+
+        $clientIdHeader = (string) config(
+            'facturador.integrations.azurion.header_client_id',
+            'X-Client-Id',
+        );
+        $providedClientId = trim((string) $request->header($clientIdHeader, ''));
+        $integrationClientId = trim((string) config(
+            'facturador.integrations.azurion.inbound_client_id',
+            'azurion-core',
+        ));
+
+        if ($providedClientId !== '') {
+            if (! $this->hasSharedReplayStore()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Shared replay protection is not configured.',
+                ], 503);
+            }
+            if ($integrationClientId === '' || ! hash_equals($integrationClientId, $providedClientId)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Invalid integration client.',
+                ], 401);
+            }
+
+            $secrets = [
+                trim((string) config('facturador.integrations.azurion.inbound_client_secret', '')),
+                trim((string) config('facturador.integrations.azurion.inbound_previous_secret', '')),
+            ];
+            $secrets = array_values(array_filter($secrets, static fn (string $secret): bool => $secret !== ''));
+            if ($secrets === []) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Integration credentials are not configured.',
+                ], 503);
+            }
+
+            $hmacError = $this->hmacRequestVerifier->verify(
+                $request,
+                $secrets,
+                'azurion:'.$providedClientId,
+                true,
+            );
+            if ($hmacError !== null) {
+                return response()->json([
+                    'success' => false,
+                    'message' => $hmacError,
+                ], 401);
+            }
+
+            $request->attributes->set('auth_mode', 'azurion_integration');
+            $request->attributes->set('integration_client_id', $providedClientId);
+
             return $next($request);
         }
 
         $apiKey = $request->header('X-API-Key');
 
         if ($apiKey !== null && $apiKey !== '') {
+            $integrationKey = trim((string) config('facturador.integrations.azurion.inbound_api_key', ''));
+            $allowLegacyIntegration = (bool) config(
+                'facturador.integrations.azurion.allow_legacy_api_key',
+                false,
+            );
+            if ($allowLegacyIntegration && $integrationKey !== '' && hash_equals($integrationKey, $apiKey)) {
+                $hmacError = $this->hmacRequestVerifier->verify($request, $integrationKey, 0);
+                if ($hmacError !== null) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => $hmacError,
+                    ], 401);
+                }
+
+                $request->attributes->set('auth_mode', 'azurion_integration');
+
+                return $next($request);
+            }
+
             $client = ApiClient::query()
                 ->with('tenant')
                 ->where('api_key_hash', hash('sha256', $apiKey))
@@ -72,6 +151,10 @@ final class ApiAuthenticationMiddleware
             $request->attributes->set('auth_mode', 'jwt');
             $request->attributes->set('tenant_id', $payload->get('tenant_id'));
             $request->attributes->set('auth_user_id', $user->getAuthIdentifier());
+            $request->attributes->set(
+                'facturador_platform_admin',
+                (bool) ($payload->get('facturador_platform_admin') ?? ($user->tenant_id === null)),
+            );
 
             return $next($request);
         } catch (\Throwable) {
@@ -80,5 +163,18 @@ final class ApiAuthenticationMiddleware
                 'message' => 'Authentication required.',
             ], 401);
         }
+    }
+
+    private function hasSharedReplayStore(): bool
+    {
+        if (! app()->environment('production')) {
+            return true;
+        }
+
+        return in_array(
+            strtolower((string) config('cache.default', '')),
+            ['redis', 'database', 'dynamodb', 'memcached'],
+            true,
+        );
     }
 }

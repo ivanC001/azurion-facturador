@@ -5,6 +5,8 @@ namespace App\Application\Sunat\UseCases;
 use App\Jobs\ProcessSunatBetaDocumentJob;
 use App\Jobs\ProcessSunatProductionDocumentJob;
 use App\Support\Tenants\TenantContext;
+use App\Models\Tenant;
+use Illuminate\Validation\ValidationException;
 
 final class DispatchSunatEnvioUseCase
 {
@@ -16,7 +18,15 @@ final class DispatchSunatEnvioUseCase
     {
         $tenant = $this->tenantContext->required();
 
-        if ($tenant->sunatMode === 'production') {
+        if (strtoupper($tenant->countryCode) !== 'PE'
+            || $tenant->documentMode !== Tenant::DOCUMENT_MODE_ELECTRONIC
+            || $tenant->fiscalStatus !== Tenant::FISCAL_STATUS_ACTIVE) {
+            throw ValidationException::withMessages([
+                'sunat' => ['El tenant no tiene habilitada la facturacion electronica SUNAT.'],
+            ]);
+        }
+
+        if ($tenant->sunatMode === Tenant::SUNAT_MODE_PRODUCTION) {
             ProcessSunatProductionDocumentJob::dispatch(
                 documentoId: $documentoId,
                 tenantId: $tenant->tenantId,
@@ -27,11 +37,19 @@ final class DispatchSunatEnvioUseCase
             return;
         }
 
-        ProcessSunatBetaDocumentJob::dispatch(
-            documentoId: $documentoId,
-            tenantId: $tenant->tenantId,
-            tenantRuc: $tenant->ruc,
-            tenantSchema: $tenant->schema,
-        );
+        if ($tenant->sunatMode === Tenant::SUNAT_MODE_BETA) {
+            ProcessSunatBetaDocumentJob::dispatch(
+                documentoId: $documentoId,
+                tenantId: $tenant->tenantId,
+                tenantRuc: $tenant->ruc,
+                tenantSchema: $tenant->schema,
+            );
+
+            return;
+        }
+
+        throw ValidationException::withMessages([
+            'sunat_mode' => ['Modo SUNAT invalido o deshabilitado.'],
+        ]);
     }
 }

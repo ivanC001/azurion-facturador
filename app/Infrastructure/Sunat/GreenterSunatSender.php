@@ -2,6 +2,8 @@
 
 namespace App\Infrastructure\Sunat;
 
+use App\Support\Tenants\TenantPrivateFileReference;
+use App\Support\Sunat\SunatEnvironment;
 use App\Domain\Documentos\Enums\DocumentStatus;
 use App\Models\Documento;
 use App\Domain\Pdf\Contracts\DocumentPdfGenerator;
@@ -33,9 +35,9 @@ use Greenter\Model\Sale\FormaPagos\FormaPagoContado;
 use Greenter\Model\Sale\FormaPagos\FormaPagoCredito;
 use Greenter\Report\XmlUtils;
 use Greenter\See;
-use Greenter\Ws\Services\SunatEndpoints;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Luecano\NumeroALetras\NumeroALetras;
 
@@ -59,6 +61,14 @@ final class GreenterSunatSender implements SunatSender
             $document = $this->buildGreenterDocument($documento, $payload);
             $cfg = $this->resolveConfig($payload, $tenant->ruc, $tenant->sunatMode, (string) $documento->tipo_documento);
 
+            Log::channel('sunat')->info('Envio de documento a SUNAT.', [
+                'documento_id' => $documento->id,
+                'tipo_documento' => $documento->tipo_documento,
+                'entorno' => $cfg['mode'],
+                'endpoint' => $cfg['service'],
+                'credenciales' => $cfg['uses_test_credentials'] ? 'prueba_automatica' : 'tenant',
+            ]);
+
             $see = new See();
             $see->setService($cfg['service']);
             $see->setCertificate($cfg['certificate_pem']);
@@ -76,6 +86,14 @@ final class GreenterSunatSender implements SunatSender
 
             if (! $result->isSuccess()) {
                 $error = $result->getError();
+
+                Log::channel('sunat')->warning('SUNAT rechazo el envio.', [
+                    'documento_id' => $documento->id,
+                    'entorno' => $cfg['mode'],
+                    'endpoint' => $cfg['service'],
+                    'codigo' => $error?->getCode(),
+                    'mensaje' => $error?->getMessage(),
+                ]);
 
                 return [
                     'estado' => DocumentStatus::REJECTED->value,
@@ -99,6 +117,14 @@ final class GreenterSunatSender implements SunatSender
             $cdrZip = method_exists($result, 'getCdrZip') ? $result->getCdrZip() : null;
             $accepted = $cdrResponse?->isAccepted() ?? true;
 
+            Log::channel('sunat')->info('SUNAT proceso el documento.', [
+                'documento_id' => $documento->id,
+                'entorno' => $cfg['mode'],
+                'endpoint' => $cfg['service'],
+                'estado' => $accepted ? DocumentStatus::ACCEPTED->value : DocumentStatus::REJECTED->value,
+                'codigo' => $cdrResponse?->getCode(),
+            ]);
+
             return [
                 'estado' => $accepted ? DocumentStatus::ACCEPTED->value : DocumentStatus::REJECTED->value,
                 'ticket' => null,
@@ -117,6 +143,12 @@ final class GreenterSunatSender implements SunatSender
                 )),
             ];
         } catch (\Throwable $exception) {
+            Log::channel('sunat')->error('No se pudo enviar el documento a SUNAT.', [
+                'documento_id' => $documento->id,
+                'error' => $exception->getMessage(),
+                'codigo' => (string) $exception->getCode(),
+            ]);
+
             return [
                 'estado' => DocumentStatus::ERROR->value,
                 'ticket' => null,
@@ -687,28 +719,52 @@ final class GreenterSunatSender implements SunatSender
     {
         $row = DB::table('configuracion_facturacion')->orderBy('id')->first();
 
-        $serviceMode = (string) ($row->modo_sunat ?? $tenantSunatMode ?: 'beta');
+        $serviceMode = strtolower(trim($tenantSunatMode));
+        if (! in_array($serviceMode, ['beta', 'production'], true)) {
+            throw new \RuntimeException('Modo SUNAT invalido o deshabilitado para el tenant.');
+        }
+
+        $storedMode = strtolower(trim((string) ($row->modo_sunat ?? '')));
+        if ($storedMode !== '' && $storedMode !== $serviceMode) {
+            Log::channel('sunat')->warning('Se ignoro un modo SUNAT interno inconsistente.', [
+                'modo_tenant' => $serviceMode,
+                'modo_configuracion' => $storedMode,
+            ]);
+        }
+
         $service = $this->resolveSunatEndpoint($serviceMode, $documentType);
 
-        $solRuc = (string) ($row->ruc_sol ?? data_get($payload, 'empresa.sunat.ruc_sol', self::TEST_SOL_RUC));
-        $solUser = (string) ($row->usuario_sol ?? data_get($payload, 'empresa.sunat.usuario_sol', self::TEST_SOL_USER));
+        $usesTestCredentials = $serviceMode === 'beta';
+        $certificateField = trim((string) ($row->certificado_url ?? ''));
 
-        $plainFromPayload = data_get($payload, 'empresa.sunat.clave_sol');
-        $encrypted = $row->clave_sol_encrypted ?? null;
-        $solPassword = $this->resolveSolPassword($encrypted, is_string($plainFromPayload) ? $plainFromPayload : null);
-
-        $certificateField = (string) ($row->certificado_url ?? data_get($payload, 'empresa.sunat.certificado_url', ''));
-        if ($serviceMode === 'production') {
+        if ($usesTestCredentials) {
+            $solRuc = self::TEST_SOL_RUC;
+            $solUser = self::TEST_SOL_USER;
+            $solPassword = self::TEST_SOL_PASSWORD;
+        } else {
+            $solRuc = trim((string) ($row->ruc_sol ?? ''));
+            $solUser = trim((string) ($row->usuario_sol ?? ''));
+            $solPassword = $this->resolveSolPassword($row->clave_sol_encrypted ?? null);
             $this->assertProductionSunatConfig($solRuc, $solUser, $solPassword, $certificateField);
+            if (! TenantPrivateFileReference::isProductionCertificateAvailable($tenantRuc, $certificateField)) {
+                throw new \RuntimeException('Modo production requiere un certificado digital real del tenant.');
+            }
         }
-        $certificatePem = $this->resolveCertificatePem($tenantRuc, $certificateField);
+
+        $certificatePem = $this->resolveCertificatePem(
+            $tenantRuc,
+            $certificateField,
+            $usesTestCredentials,
+        );
 
         return [
+            'mode' => $serviceMode,
             'service' => $service,
             'sol_ruc' => $solRuc,
             'sol_user' => $solUser,
             'sol_password' => $solPassword,
             'certificate_pem' => $certificatePem,
+            'uses_test_credentials' => $usesTestCredentials,
             'logo_pdf_url' => is_string($row->logo_pdf_url ?? null) ? trim((string) $row->logo_pdf_url) : '',
         ];
     }
@@ -739,72 +795,42 @@ final class GreenterSunatSender implements SunatSender
 
     private function resolveSunatEndpoint(string $serviceMode, string $documentType): string
     {
-        if ($documentType === '09') {
-            return $serviceMode === 'production'
-                ? SunatEndpoints::GUIA_PRODUCCION
-                : SunatEndpoints::GUIA_BETA;
-        }
-
-        return $serviceMode === 'production'
-            ? SunatEndpoints::FE_PRODUCCION
-            : SunatEndpoints::FE_BETA;
+        return SunatEnvironment::endpoint($serviceMode, $documentType)
+            ?? throw new \RuntimeException('No existe un endpoint SUNAT para el modo solicitado.');
     }
 
-    private function resolveSolPassword(mixed $encrypted, ?string $plain): string
+    private function resolveSolPassword(mixed $encrypted): string
     {
-        if ($plain !== null && $plain !== '') {
-            return $plain;
-        }
-
         if (! is_string($encrypted) || $encrypted === '') {
-            return self::TEST_SOL_PASSWORD;
+            return '';
         }
 
         try {
             return Crypt::decryptString($encrypted);
         } catch (\Throwable) {
-            return $encrypted;
+            return '';
         }
     }
 
-    private function resolveCertificatePem(string $tenantRuc, string $certRef): string
+    private function resolveCertificatePem(string $tenantRuc, string $certRef, bool $useTestCertificate): string
     {
+        if ($useTestCertificate) {
+            $testCertificate = storage_path('certificates/ejemplo123456789.pem');
+            if (is_file($testCertificate)) {
+                return (string) file_get_contents($testCertificate);
+            }
+
+            throw new \RuntimeException('No se encontro el certificado de prueba SUNAT del servidor.');
+        }
+
         if ($certRef !== '') {
-            if (str_contains($certRef, '-----BEGIN')) {
-                return $certRef;
-            }
-
-            if (Storage::disk('tenants')->exists($certRef)) {
-                return (string) Storage::disk('tenants')->get($certRef);
-            }
-
-            $absolute = $this->normalizeAbsolutePath($certRef);
-            if (is_file($absolute)) {
-                return (string) file_get_contents($absolute);
+            $safeKey = TenantPrivateFileReference::safeKey($tenantRuc, 'certificados', $certRef);
+            if ($safeKey !== null && Storage::disk(config('facturador.storage.disk', 'tenants'))->exists($safeKey)) {
+                return (string) Storage::disk(config('facturador.storage.disk', 'tenants'))->get($safeKey);
             }
         }
 
-        $fallbacks = [
-            storage_path('app/tenants/'.$tenantRuc.'/certificados/ejemplo123456789.pem'),
-            storage_path('certificates/ejemplo123456789.pem'),
-        ];
-
-        foreach ($fallbacks as $file) {
-            if (is_file($file)) {
-                return (string) file_get_contents($file);
-            }
-        }
-
-        throw new \RuntimeException('No certificate PEM found. Configure certificado_url or upload tenant certificate.');
-    }
-
-    private function normalizeAbsolutePath(string $path): string
-    {
-        if (preg_match('/^[A-Za-z]:\\\\/', $path) === 1 || str_starts_with($path, '/')) {
-            return $path;
-        }
-
-        return base_path($path);
+        throw new \RuntimeException('No certificate PEM found. Upload a certificate for the current tenant.');
     }
 
     private function parseDate(mixed $value): DateTime

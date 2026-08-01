@@ -3,13 +3,15 @@
 namespace Tests\Unit;
 
 use App\Infrastructure\Pdf\SimpleDocumentPdfGenerator;
+use App\Support\Tenants\TenantContext;
+use App\Support\Tenants\TenantIdentity;
 use PHPUnit\Framework\TestCase;
 
 class SimpleDocumentPdfGeneratorTest extends TestCase
 {
     public function test_generate_returns_valid_pdf_with_enterprise_sections(): void
     {
-        $generator = new SimpleDocumentPdfGenerator();
+        $generator = $this->generator();
 
         $pdf = $generator->generate([
             'estado' => 'RECIBIDO',
@@ -69,7 +71,7 @@ class SimpleDocumentPdfGeneratorTest extends TestCase
 
     public function test_generate_ticket_pdf_uses_ticket_format(): void
     {
-        $generator = new SimpleDocumentPdfGenerator();
+        $generator = $this->generator();
 
         $pdf = $generator->generate([
             'estado' => 'REGISTRADO',
@@ -110,5 +112,21 @@ class SimpleDocumentPdfGeneratorTest extends TestCase
         $this->assertStringContainsString('TICKET DE VENTA', $pdf);
         $this->assertStringContainsString('ticket no SUNAT', $pdf);
         $this->assertStringContainsString('TOTAL', $pdf);
+    }
+
+    private function generator(): SimpleDocumentPdfGenerator
+    {
+        $context = new TenantContext();
+        $context->set(new TenantIdentity(
+            tenantId: 1,
+            ruc: '20601234567',
+            schema: 'tenant_test',
+            sunatMode: 'beta',
+            countryCode: 'PE',
+            documentMode: 'electronic',
+            fiscalStatus: 'active',
+        ));
+
+        return new SimpleDocumentPdfGenerator($context);
     }
 }

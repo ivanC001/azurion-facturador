@@ -53,9 +53,9 @@ final class SunatController
         $pdfPath = $this->storagePathResolver->pdfPath($baseName.'.pdf');
         $cdrPath = $this->storagePathResolver->cdrPath('R-'.$baseName.'.zip');
 
-        $xmlExists = Storage::disk('tenants')->exists($xmlPath);
-        $pdfExists = Storage::disk('tenants')->exists($pdfPath);
-        $cdrExists = Storage::disk('tenants')->exists($cdrPath);
+        $xmlExists = Storage::disk(config('facturador.storage.disk', 'tenants'))->exists($xmlPath);
+        $pdfExists = Storage::disk(config('facturador.storage.disk', 'tenants'))->exists($pdfPath);
+        $cdrExists = Storage::disk(config('facturador.storage.disk', 'tenants'))->exists($cdrPath);
 
         $baseUrl = rtrim(config('app.url'), '/');
         $tenantRuc = (string) ($status['empresa_ruc'] ?? '00000000000');

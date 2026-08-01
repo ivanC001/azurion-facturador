@@ -8,6 +8,13 @@ use OpenApi\Attributes as OA;
 #[OA\Server(url: '/api', description: 'API base')]
 #[OA\SecurityScheme(securityScheme: 'bearerAuth', type: 'http', bearerFormat: 'JWT', scheme: 'bearer')]
 #[OA\SecurityScheme(securityScheme: 'apiKeyAuth', type: 'apiKey', in: 'header', name: 'X-API-Key')]
+#[OA\SecurityScheme(
+    securityScheme: 'azurionClient',
+    type: 'apiKey',
+    in: 'header',
+    name: 'X-Client-Id',
+    description: 'Integracion Azurion con firma HMAC v2, timestamp, nonce y tenant firmado',
+)]
 #[OA\PathItem(path: '/documentos')]
 final class AzurionOpenApi
 {
@@ -21,9 +28,7 @@ final class AzurionOpenApi
             new OA\Response(response: 422, description: 'Validacion fallida'),
         ]
     )]
-    public function postDocumentos(): void
-    {
-    }
+    public function postDocumentos(): void {}
 
     #[OA\Post(
         path: '/sunat/enviar',
@@ -34,9 +39,7 @@ final class AzurionOpenApi
             new OA\Response(response: 202, description: 'Solicitud en cola'),
         ]
     )]
-    public function postSunatEnviar(): void
-    {
-    }
+    public function postSunatEnviar(): void {}
 
     #[OA\Get(
         path: '/sunat/estado',
@@ -50,7 +53,5 @@ final class AzurionOpenApi
             new OA\Response(response: 200, description: 'Estado actual'),
         ]
     )]
-    public function getSunatEstado(): void
-    {
-    }
+    public function getSunatEstado(): void {}
 }
