@@ -7,8 +7,8 @@ use App\Domain\Documentos\Contracts\DocumentoRepository;
 use App\Domain\Documentos\Events\DocumentoRecibido;
 use App\Domain\Pdf\Contracts\DocumentPdfGenerator;
 use App\Application\Sunat\UseCases\DispatchSunatEnvioUseCase;
+use App\Infrastructure\Pdf\TenantBillingLogoResolver;
 use App\Infrastructure\Tenant\TenantStoragePathResolver;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\URL;
 
@@ -19,6 +19,7 @@ final class CreateDocumentoUseCase
         private readonly DispatchSunatEnvioUseCase $dispatchSunatEnvioUseCase,
         private readonly DocumentPdfGenerator $documentPdfGenerator,
         private readonly TenantStoragePathResolver $tenantStoragePathResolver,
+        private readonly TenantBillingLogoResolver $tenantBillingLogoResolver,
     ) {
     }
 
@@ -56,12 +57,24 @@ final class CreateDocumentoUseCase
 
         return [
             'documento_id' => $documento->id,
+            'serie' => $documento->serie,
+            'correlativo' => $documento->correlativo,
+            'numero_documento' => $this->documentNumber($documento),
             'estado' => $documento->estado,
             'sunat_async' => $sendToSunat,
             'pdf_url' => $this->signedArtifactUrl('documentos.pdf', $documento->id, $ruc),
             'xml_url' => $sendToSunat ? $this->signedArtifactUrl('documentos.xml', $documento->id, $ruc) : null,
             'cdr_url' => $sendToSunat ? $this->signedArtifactUrl('documentos.cdr', $documento->id, $ruc) : null,
         ];
+    }
+
+    private function documentNumber(\App\Models\Documento $documento): string
+    {
+        $correlativo = is_numeric($documento->correlativo)
+            ? str_pad((string) $documento->correlativo, 8, '0', STR_PAD_LEFT)
+            : (string) $documento->correlativo;
+
+        return sprintf('%s-%s', (string) $documento->serie, $correlativo);
     }
 
     private function signedArtifactUrl(string $routeName, int $documentId, string $ruc): string
@@ -88,7 +101,7 @@ final class CreateDocumentoUseCase
             'mensaje' => $sendToSunat
                 ? 'Documento registrado. Facturacion en cola para SUNAT.'
                 : 'Ticket de venta registrado en facturador.',
-            'empresa' => $this->withTenantBillingLogo((array) data_get($payload, 'empresa', [])),
+            'empresa' => $this->tenantBillingLogoResolver->resolve((array) data_get($payload, 'empresa', [])),
             'cliente' => (array) data_get($payload, 'cliente', []),
             'documento' => $documentoPayload,
             'detalles' => (array) data_get($payload, 'detalles', []),
@@ -106,26 +119,4 @@ final class CreateDocumentoUseCase
         return sprintf('%s-%s-%s-%s', $ruc, $documento->tipo_documento, $documento->serie, $documento->correlativo);
     }
 
-    /**
-     * @param array<string, mixed> $empresa
-     * @return array<string, mixed>
-     */
-    private function withTenantBillingLogo(array $empresa): array
-    {
-        if (trim((string) ($empresa['logo_pdf_url'] ?? $empresa['logo_url'] ?? '')) !== '') {
-            return $empresa;
-        }
-
-        try {
-            $logo = DB::table('configuracion_facturacion')->orderBy('id')->value('logo_pdf_url');
-        } catch (\Throwable) {
-            $logo = null;
-        }
-
-        if (is_string($logo) && trim($logo) !== '') {
-            $empresa['logo_pdf_url'] = trim($logo);
-        }
-
-        return $empresa;
-    }
 }

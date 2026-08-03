@@ -11,11 +11,11 @@ use App\Application\Documentos\UseCases\ListDocumentosUseCase;
 use App\Domain\Pdf\Contracts\DocumentPdfGenerator;
 use App\Support\Ubigeos\UbigeoCatalog;
 use App\Infrastructure\Tenant\TenantStoragePathResolver;
+use App\Infrastructure\Pdf\TenantBillingLogoResolver;
 use App\Support\ApiResponse;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Cache;
@@ -33,6 +33,7 @@ final class DocumentoController
         private readonly UbigeoCatalog $ubigeoCatalog,
         private readonly DocumentoTaxPayloadValidator $documentTaxPayloadValidator,
         private readonly DocumentEmissionPolicy $documentEmissionPolicy,
+        private readonly TenantBillingLogoResolver $tenantBillingLogoResolver,
     ) {
     }
 
@@ -73,6 +74,8 @@ final class DocumentoController
             if (! $includeArtifacts) {
                 return array_merge($item, [
                     'pdf_url' => $id > 0 ? $this->signedArtifactUrl('documentos.pdf', $id, $ruc) : null,
+                    'pdf_a4_url' => $id > 0 ? $this->signedArtifactUrl('documentos.pdf', $id, $ruc, 'a4') : null,
+                    'pdf_ticket_url' => $id > 0 ? $this->signedArtifactUrl('documentos.pdf', $id, $ruc, 'ticket') : null,
                     'xml_url' => ($id > 0 && ! $isTicket) ? $this->signedArtifactUrl('documentos.xml', $id, $ruc) : null,
                     'cdr_url' => ($id > 0 && ! $isTicket) ? $this->signedArtifactUrl('documentos.cdr', $id, $ruc) : null,
                     'has_pdf' => null,
@@ -87,6 +90,8 @@ final class DocumentoController
 
             return array_merge($item, [
                 'pdf_url' => ($id > 0 && $pdfExists) ? $this->signedArtifactUrl('documentos.pdf', $id, $ruc) : null,
+                'pdf_a4_url' => $id > 0 ? $this->signedArtifactUrl('documentos.pdf', $id, $ruc, 'a4') : null,
+                'pdf_ticket_url' => $id > 0 ? $this->signedArtifactUrl('documentos.pdf', $id, $ruc, 'ticket') : null,
                 'xml_url' => ($id > 0 && $xmlExists) ? $this->signedArtifactUrl('documentos.xml', $id, $ruc) : null,
                 'cdr_url' => ($id > 0 && $cdrExists) ? $this->signedArtifactUrl('documentos.cdr', $id, $ruc) : null,
                 'has_pdf' => $pdfExists,
@@ -155,6 +160,8 @@ final class DocumentoController
 
         return ApiResponse::success(array_merge($documento, [
             'pdf_url' => $this->signedArtifactUrl('documentos.pdf', $id, $ruc),
+            'pdf_a4_url' => $this->signedArtifactUrl('documentos.pdf', $id, $ruc, 'a4'),
+            'pdf_ticket_url' => $this->signedArtifactUrl('documentos.pdf', $id, $ruc, 'ticket'),
             'xml_url' => $isTicket ? null : $this->signedArtifactUrl('documentos.xml', $id, $ruc),
             'cdr_url' => $isTicket ? null : $this->signedArtifactUrl('documentos.cdr', $id, $ruc),
             'has_pdf' => $pdfExists,
@@ -163,9 +170,16 @@ final class DocumentoController
         ]));
     }
 
-    public function pdf(int $id): StreamedResponse
+    public function pdf(Request $request, int $id): StreamedResponse
     {
-        return $this->download($id, 'pdf', '.pdf', 'application/pdf');
+        return $this->download(
+            $id,
+            'pdf',
+            '.pdf',
+            'application/pdf',
+            '',
+            $this->normalizePdfFormat($request->query('formato')),
+        );
     }
 
     public function xml(int $id): StreamedResponse
@@ -227,10 +241,15 @@ final class DocumentoController
         $response = [
             'estado' => $result['estado'],
             'documento_id' => $result['documento_id'],
+            'serie' => $result['serie'] ?? null,
+            'correlativo' => $result['correlativo'] ?? null,
+            'numero_documento' => $result['numero_documento'] ?? null,
             'sunat_async' => (bool) ($result['sunat_async'] ?? false),
             'ticket' => null,
             'hash' => null,
             'pdf_url' => $result['pdf_url'] ?? null,
+            'pdf_a4_url' => $this->signedArtifactUrl('documentos.pdf', (int) $result['documento_id'], (string) data_get($data, 'empresa.ruc'), 'a4'),
+            'pdf_ticket_url' => $this->signedArtifactUrl('documentos.pdf', (int) $result['documento_id'], (string) data_get($data, 'empresa.ruc'), 'ticket'),
             'xml_url' => $result['xml_url'] ?? null,
             'cdr_url' => $result['cdr_url'] ?? null,
         ];
@@ -240,12 +259,17 @@ final class DocumentoController
             : ApiResponse::success($response, 201);
     }
 
-    private function signedArtifactUrl(string $routeName, int $documentId, string $ruc): string
+    private function signedArtifactUrl(string $routeName, int $documentId, string $ruc, ?string $pdfFormat = null): string
     {
+        $parameters = ['id' => $documentId, 'tenant_ruc' => $ruc];
+        if ($routeName === 'documentos.pdf' && $pdfFormat !== null) {
+            $parameters['formato'] = $pdfFormat;
+        }
+
         return URL::temporarySignedRoute(
             $routeName,
             now()->addMinutes(30),
-            ['id' => $documentId, 'tenant_ruc' => $ruc],
+            $parameters,
         );
     }
 
@@ -278,12 +302,15 @@ final class DocumentoController
             return $data;
         }
 
+        $customerDocumentType = (string) data_get($data, 'cliente.tipo_doc', '');
+        $customerDocumentNumber = (string) data_get($data, 'cliente.num_doc', '');
+        $hasValidIdentity = ($customerDocumentType === '1' && preg_match('/^[0-9]{8}$/', $customerDocumentNumber) === 1)
+            || ($customerDocumentType === '6' && preg_match('/^[0-9]{11}$/', $customerDocumentNumber) === 1);
+
         abort_unless(
-            data_get($data, 'cliente.tipo_doc') === '1'
-            && preg_match('/^[0-9]{8}$/', (string) data_get($data, 'cliente.num_doc', '')) === 1
-            && $this->customerName($data) !== '',
+            $hasValidIdentity && $this->customerName($data) !== '',
             422,
-            'Boleta mayor a S/ 500 requiere DNI de 8 digitos y nombre del cliente.',
+            'Boleta mayor a S/ 500 requiere un cliente identificado con DNI o RUC.',
         );
 
         return $data;
@@ -403,7 +430,30 @@ final class DocumentoController
         return $data;
     }
 
-    private function download(int $id, string $type, string $ext, string $contentType, string $prefix = ''): StreamedResponse
+    private function normalizePdfFormat(mixed $format): ?string
+    {
+        if ($format === null || trim((string) $format) === '') {
+            return null;
+        }
+
+        $normalized = strtolower(trim((string) $format));
+        abort_unless(
+            in_array($normalized, ['a4', 'ticket'], true),
+            422,
+            'El formato de impresion debe ser a4 o ticket.',
+        );
+
+        return $normalized;
+    }
+
+    private function download(
+        int $id,
+        string $type,
+        string $ext,
+        string $contentType,
+        string $prefix = '',
+        ?string $pdfFormat = null,
+    ): StreamedResponse
     {
         $documento = $this->getDocumentoUseCase->execute($id);
 
@@ -412,8 +462,9 @@ final class DocumentoController
         $serie = (string) data_get($documento, 'serie', 'F001');
         $correlativo = (string) data_get($documento, 'correlativo', '1');
 
-        $nameWithType = sprintf('%s%s-%s-%s-%s%s', $prefix, $ruc, $tipoDocumento, $serie, $correlativo, $ext);
-        $legacyName = sprintf('%s%s-%s-%s%s', $prefix, $ruc, $serie, $correlativo, $ext);
+        $formatSuffix = $type === 'pdf' && $pdfFormat !== null ? '-'.$pdfFormat : '';
+        $nameWithType = sprintf('%s%s-%s-%s-%s%s%s', $prefix, $ruc, $tipoDocumento, $serie, $correlativo, $formatSuffix, $ext);
+        $legacyName = sprintf('%s%s-%s-%s%s%s', $prefix, $ruc, $serie, $correlativo, $formatSuffix, $ext);
 
         $primaryPath = match ($type) {
             'pdf' => $this->storagePathResolver->pdfPath($nameWithType),
@@ -427,7 +478,7 @@ final class DocumentoController
         };
 
         if ($type === 'pdf') {
-            $this->generatePdfOnDemand($documento, $primaryPath);
+            $this->generatePdfOnDemand($documento, $primaryPath, $pdfFormat);
         }
 
         $path = Storage::disk(config('facturador.storage.disk', 'tenants'))->exists($primaryPath)
@@ -441,7 +492,7 @@ final class DocumentoController
         ]);
     }
 
-    private function generatePdfOnDemand(array $documento, string $targetPath): void
+    private function generatePdfOnDemand(array $documento, string $targetPath, ?string $pdfFormat = null): void
     {
         $disk = Storage::disk(config('facturador.storage.disk', 'tenants'));
         if ($disk->exists($targetPath)) {
@@ -449,7 +500,7 @@ final class DocumentoController
         }
 
         try {
-            Cache::lock('pdf-generation:'.hash('sha256', $targetPath), 60)->block(15, function () use ($disk, $documento, $targetPath): void {
+            Cache::lock('pdf-generation:'.hash('sha256', $targetPath), 60)->block(15, function () use ($disk, $documento, $targetPath, $pdfFormat): void {
                 if ($disk->exists($targetPath)) {
                     return;
                 }
@@ -464,10 +515,11 @@ final class DocumentoController
                     'estado' => (string) data_get($documento, 'estado', 'REGISTRADO'),
                     'hash' => data_get($documento, 'hash'),
                     'mensaje' => $this->buildPdfMessage($documento),
-                    'empresa' => $this->withTenantBillingLogo((array) data_get($payload, 'empresa', [])),
+                    'empresa' => $this->tenantBillingLogoResolver->resolve((array) data_get($payload, 'empresa', [])),
                     'cliente' => (array) data_get($payload, 'cliente', []),
                     'documento' => $documentoPayload,
                     'detalles' => (array) data_get($payload, 'detalles', []),
+                    'formato' => $pdfFormat,
                 ];
 
                 $pdfBinary = $this->documentPdfGenerator->generate($pdfContext);
@@ -496,26 +548,4 @@ final class DocumentoController
         };
     }
 
-    /**
-     * @param array<string, mixed> $empresa
-     * @return array<string, mixed>
-     */
-    private function withTenantBillingLogo(array $empresa): array
-    {
-        if (trim((string) ($empresa['logo_pdf_url'] ?? $empresa['logo_url'] ?? '')) !== '') {
-            return $empresa;
-        }
-
-        try {
-            $logo = DB::table('configuracion_facturacion')->orderBy('id')->value('logo_pdf_url');
-        } catch (\Throwable) {
-            $logo = null;
-        }
-
-        if (is_string($logo) && trim($logo) !== '') {
-            $empresa['logo_pdf_url'] = trim($logo);
-        }
-
-        return $empresa;
-    }
 }

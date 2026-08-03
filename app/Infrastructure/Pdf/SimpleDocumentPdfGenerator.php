@@ -5,6 +5,8 @@ namespace App\Infrastructure\Pdf;
 use App\Domain\Pdf\Contracts\DocumentPdfGenerator;
 use App\Support\Tenants\TenantContext;
 use App\Support\Tenants\TenantPrivateFileReference;
+use BaconQrCode\Common\ErrorCorrectionLevel;
+use BaconQrCode\Encoder\Encoder;
 use Illuminate\Support\Facades\Storage;
 use Luecano\NumeroALetras\NumeroALetras;
 
@@ -81,6 +83,17 @@ final class SimpleDocumentPdfGenerator implements DocumentPdfGenerator
         $clienteTipoDoc = $this->txt($cliente['tipo_doc'] ?? '0');
         $clienteNumDoc = $this->txt($cliente['num_doc'] ?? '-');
         $clienteDireccion = $this->txt($cliente['direccion'] ?? '-');
+        $clienteCorreo = $this->txt($cliente['correo'] ?? $cliente['email'] ?? '-');
+        $clienteTelefono = $this->txt($cliente['telefono'] ?? '-');
+
+        $empresaCorreo = $this->txt($empresa['correo'] ?? $empresa['email'] ?? $this->arr($empresa, 'contacto.correo', '-'));
+        $empresaTelefono = $this->txt($empresa['telefono'] ?? $this->arr($empresa, 'contacto.telefono', '-'));
+        $empresaWebsite = $this->txt($empresa['website'] ?? $empresa['sitio_web'] ?? '-');
+        $cuentasBancarias = $this->normalizeBankAccounts(
+            is_array($context['cuentas_bancarias'] ?? null)
+                ? $context['cuentas_bancarias']
+                : (is_array($empresa['cuentas_bancarias'] ?? null) ? $empresa['cuentas_bancarias'] : [])
+        );
 
         $montoLetras = $this->resolveAmountInWords(
             documento: $documento,
@@ -107,10 +120,16 @@ final class SimpleDocumentPdfGenerator implements DocumentPdfGenerator
             'empresa_nombre_comercial' => $empresaComercial,
             'empresa_direccion' => $empresaDireccion,
             'empresa_logo_ref' => $empresaLogoRef,
+            'empresa_correo' => $empresaCorreo,
+            'empresa_telefono' => $empresaTelefono,
+            'empresa_website' => $empresaWebsite,
             'cliente_nombre' => $clienteNombre,
             'cliente_tipo_doc' => $clienteTipoDoc,
             'cliente_num_doc' => $clienteNumDoc,
             'cliente_direccion' => $clienteDireccion,
+            'cliente_correo' => $clienteCorreo,
+            'cliente_telefono' => $clienteTelefono,
+            'cuentas_bancarias' => $cuentasBancarias,
             'detalles' => $rows,
             'sub_total' => $subTotal,
             'igv' => $igv,
@@ -124,14 +143,380 @@ final class SimpleDocumentPdfGenerator implements DocumentPdfGenerator
             'monto_letras' => $montoLetras,
         ];
 
-        if ($tipo === 'TK') {
-            $rendered = $this->renderTicketPage($pageData);
+        $pageData['qr_content'] = $this->buildQrContent($pageData);
+
+        $requestedFormat = strtolower(trim((string) ($context['formato'] ?? '')));
+        $renderAsTicket = match ($requestedFormat) {
+            'ticket', 'thermal', 'termico', '80mm' => true,
+            'a4' => false,
+            default => $tipo === 'TK',
+        };
+
+        if ($renderAsTicket) {
+            $rendered = $this->renderReferenceTicketPage($pageData);
             return $this->buildPdfDocument($rendered['content'], $rendered['width'], $rendered['height']);
         }
 
-        $content = $this->renderEnterprisePage($pageData);
+        $content = $this->renderReferenceEnterprisePage($pageData);
 
         return $this->buildPdfDocument($content, self::PAGE_WIDTH, self::PAGE_HEIGHT);
+    }
+
+    /**
+     * Formato A4 comercial compacto basado en la referencia aprobada.
+     * El logo se presenta libre, sin marco, y el color institucional se usa
+     * unicamente para ordenar la lectura del comprobante.
+     *
+     * @param array<string, mixed> $data
+     */
+    private function renderReferenceEnterprisePage(array $data): string
+    {
+        $this->currentPageHeight = self::PAGE_HEIGHT;
+        $x = self::MARGIN;
+        $w = self::PAGE_WIDTH - (self::MARGIN * 2);
+        $teal = [0, 132, 133];
+        $tealDark = [0, 91, 94];
+        $border = [77, 145, 147];
+        $muted = [55, 65, 81];
+        $commands = [];
+
+        $this->drawLogo(
+            $commands,
+            (string) $data['empresa_logo_ref'],
+            $x + 2,
+            27,
+            92,
+            70,
+            (string) $data['empresa_razon_social'],
+            false,
+        );
+
+        $companyX = $x + 100;
+        $companyW = 232.0;
+        $this->drawText($commands, $companyX, 36, $this->fitText((string) $data['empresa_nombre_comercial'], $companyW, 10), 10, true, $tealDark);
+        $this->drawText($commands, $companyX, 51, $this->fitText((string) $data['empresa_razon_social'], $companyW, 7.2), 7.2, true, [30, 41, 59]);
+        $addressLines = $this->wrapText((string) $data['empresa_direccion'], $companyW, 6.4);
+        $addressY = 64.0;
+        foreach (array_slice($addressLines, 0, 3) as $line) {
+            $this->drawText($commands, $companyX, $addressY, $line, 6.4, false, $muted);
+            $addressY += 8.0;
+        }
+        $contact = $this->joinNonEmpty([
+            (string) ($data['empresa_telefono'] ?? '-'),
+            (string) ($data['empresa_correo'] ?? '-'),
+            (string) ($data['empresa_website'] ?? '-'),
+        ]);
+        $this->drawText($commands, $companyX, 94, $this->fitText($contact === '' ? '-' : $contact, $companyW, 6.2), 6.2, false, $muted);
+
+        $docX = $x + 341;
+        $docW = $w - 341;
+        $docCenter = $docX + ($docW / 2);
+        $this->drawBox($commands, $docX, 22, $docW, 92, $border, [255, 255, 255], 0.9);
+        $this->drawText($commands, $docCenter, 42, 'RUC: '.(string) $data['empresa_ruc'], 10, true, [17, 24, 39], 'center');
+        $this->drawLine($commands, $docX, 49, $docX + $docW, 49, $border, 0.7);
+        $this->drawBox($commands, $docX, 50, $docW, 25, $teal, $teal, 0.0);
+        $this->drawText($commands, $docCenter, 67, (string) $data['tipo_label'], 8.2, true, [255, 255, 255], 'center');
+        $this->drawLine($commands, $docX, 76, $docX + $docW, 76, $border, 0.7);
+        $this->drawText($commands, $docCenter, 99, (string) $data['numero'], 15, true, [17, 24, 39], 'center');
+
+        $clientY = 121.0;
+        $clientW = 341.0;
+        $gap = 7.0;
+        $metaX = $x + $clientW + $gap;
+        $metaW = $w - $clientW - $gap;
+        $this->drawBox($commands, $x, $clientY, $clientW, 82, $border, [255, 255, 255], 0.8);
+        $clientRows = [
+            ['CLIENTE', (string) $data['cliente_nombre']],
+            ['DOC.', (string) $data['cliente_tipo_doc'].' - '.(string) $data['cliente_num_doc']],
+            ['DIRECCION', (string) $data['cliente_direccion']],
+            ['CONTACTO', $this->joinNonEmpty([(string) $data['cliente_telefono'], (string) $data['cliente_correo']])],
+            ['UBIGEO', '-'],
+        ];
+        $clientRowY = $clientY + 14;
+        foreach ($clientRows as $row) {
+            $this->drawText($commands, $x + 6, $clientRowY, (string) $row[0], 6.4, true, $tealDark);
+            $this->drawText($commands, $x + 59, $clientRowY, $this->fitText((string) $row[1], $clientW - 66, 6.8), 6.8, $row[0] === 'CLIENTE', [30, 41, 59]);
+            $clientRowY += 14.2;
+        }
+
+        $this->drawBox($commands, $metaX, $clientY, $metaW, 82, $border, [255, 255, 255], 0.8);
+        $metaRows = [
+            ['FEC. EMISION', (string) $data['fecha_emision']],
+            ['MONEDA', (string) $data['moneda']],
+            ['COND. PAGO', (string) $data['forma_pago']],
+            ['ORD. COMPRA', '-'],
+            ['ESTADO', (string) $data['estado']],
+        ];
+        $metaY = $clientY + 14;
+        foreach ($metaRows as $row) {
+            $this->drawText($commands, $metaX + 7, $metaY, (string) $row[0], 6.2, true, $tealDark);
+            $this->drawText($commands, $metaX + 75, $metaY, $this->fitText((string) $row[1], $metaW - 82, 6.4), 6.4, false, [30, 41, 59]);
+            $metaY += 14.2;
+        }
+
+        $tableY = 210.0;
+        $tableH = 336.0;
+        $this->drawBox($commands, $x, $tableY, $w, $tableH, $border, [255, 255, 255], 0.8);
+        $this->drawBox($commands, $x, $tableY, $w, 21, $teal, $teal, 0.0);
+        $colWidths = [286.0, 78.0, 58.0, 60.0, 65.0];
+        $colLabels = ['DESCRIPCION', 'UM SUNAT', 'CANTIDAD', 'PRECIO', 'IMPORTE'];
+        $colX = [$x];
+        foreach ($colWidths as $width) {
+            $colX[] = end($colX) + $width;
+        }
+        foreach ($colX as $lineX) {
+            $this->drawLine($commands, $lineX, $tableY, $lineX, $tableY + $tableH, [198, 221, 222], 0.45);
+        }
+        foreach ($colLabels as $index => $label) {
+            $this->drawText($commands, $colX[$index] + ($colWidths[$index] / 2), $tableY + 14.5, $label, 7, true, [255, 255, 255], 'center');
+        }
+
+        /** @var array<int, array<string, mixed>> $detalles */
+        $detalles = is_array($data['detalles'] ?? null) ? $data['detalles'] : [];
+        $currentY = $tableY + 24;
+        $maxY = $tableY + $tableH - 8;
+        $shownRows = 0;
+        foreach ($detalles as $row) {
+            $description = $this->joinNonEmpty([(string) ($row['codigo'] ?? '-'), (string) ($row['descripcion'] ?? '-')]);
+            $descLines = $this->wrapText($description, $colWidths[0] - 8, 7.2);
+            $descLines = $descLines === [] ? ['-'] : $descLines;
+            $rowHeight = max(15.0, (count($descLines) * 8.2) + 5.0);
+            if (($currentY + $rowHeight + 2.0) > $maxY) {
+                $this->drawText($commands, $x + 8, $maxY - 3, '... listado truncado por espacio de pagina ...', 6.3, false, [100, 116, 139]);
+                break;
+            }
+            $baseY = $currentY + 10.5;
+            $this->drawText($commands, $colX[1] + ($colWidths[1] / 2), $baseY, $this->fitText((string) ($row['unidad'] ?? 'NIU'), $colWidths[1] - 6, 7), 7, false, [30, 41, 59], 'center');
+            $this->drawText($commands, $colX[2] + $colWidths[2] - 4, $baseY, (string) ($row['cantidad_fmt'] ?? '0.00'), 7, false, [30, 41, 59], 'right');
+            $this->drawText($commands, $colX[3] + $colWidths[3] - 4, $baseY, (string) ($row['precio_unitario_fmt'] ?? $row['valor_unitario_fmt'] ?? '0.00'), 7, false, [30, 41, 59], 'right');
+            $this->drawText($commands, $colX[4] + $colWidths[4] - 4, $baseY, (string) ($row['total_fmt'] ?? '0.00'), 7, true, [15, 23, 42], 'right');
+            $descY = $currentY + 9.5;
+            foreach ($descLines as $line) {
+                $this->drawText($commands, $colX[0] + 4, $descY, $line, 7.2, false, [30, 41, 59]);
+                $descY += 8.2;
+            }
+            $this->drawLine($commands, $x, $currentY + $rowHeight, $x + $w, $currentY + $rowHeight, [215, 231, 232], 0.45);
+            $currentY += $rowHeight;
+            $shownRows++;
+        }
+        if ($shownRows === 0) {
+            $this->drawText($commands, $x + ($w / 2), $tableY + 46, 'Sin items registrados.', 7, false, [100, 116, 139], 'center');
+        }
+
+        $summaryY = 554.0;
+        $leftSummaryW = 352.0;
+        $rightSummaryX = $x + $leftSummaryW + $gap;
+        $rightSummaryW = $w - $leftSummaryW - $gap;
+        $this->drawBox($commands, $x, $summaryY, $leftSummaryW, 82, $border, [255, 255, 255], 0.8);
+        $this->drawBox($commands, $rightSummaryX, $summaryY, $rightSummaryW, 82, $border, [255, 255, 255], 0.8);
+        $this->drawText($commands, $x + 7, $summaryY + 14, 'CUENTA DETRACCIONES / CONDICIONES DE PAGO', 6.4, true, $tealDark);
+        $conditionRows = [
+            ['FORMA DE PAGO:', (string) $data['forma_pago']],
+            ['MONEDA:', (string) $data['moneda']],
+            ['ESTADO:', (string) $data['estado']],
+            ['TICKET / HASH:', $this->joinNonEmpty([(string) $data['ticket'], (string) $data['hash']])],
+        ];
+        $conditionY = $summaryY + 30;
+        foreach ($conditionRows as $row) {
+            $this->drawText($commands, $x + 7, $conditionY, (string) $row[0], 6.4, true, [30, 41, 59]);
+            $this->drawText($commands, $x + 85, $conditionY, $this->fitText((string) $row[1], $leftSummaryW - 92, 6.4), 6.4, false, $muted);
+            $conditionY += 14.5;
+        }
+        $amountRows = [
+            ['SUB TOTAL', (float) ($data['sub_total'] ?? 0)],
+            ['DSCTO', (float) ($data['descuento'] ?? 0)],
+            ['OP. GRAVADA', (float) ($data['sub_total'] ?? 0)],
+            ['OP. EXONERADA', (float) ($data['oper_exoneradas'] ?? 0)],
+            ['OP. INAFECTA', (float) ($data['oper_inafectas'] ?? 0)],
+            ['IGV', (float) ($data['igv'] ?? 0)],
+        ];
+        $amountX = $rightSummaryX + 7;
+        $amountRight = $rightSummaryX + $rightSummaryW - 7;
+        $amountY = $summaryY + 11;
+        foreach ($amountRows as $row) {
+            $this->drawText($commands, $amountX, $amountY, (string) $row[0], 6.2, true, [30, 41, 59]);
+            $this->drawText($commands, $amountRight, $amountY, (string) $data['simbolo'].' '.number_format((float) $row[1], 2, '.', ','), 6.4, false, [30, 41, 59], 'right');
+            $amountY += 9.2;
+        }
+        $this->drawLine($commands, $amountX, $summaryY + 68, $amountRight, $summaryY + 68, $border, 0.8);
+        $this->drawText($commands, $amountX, $summaryY + 78, 'TOTAL', 7.8, true, [15, 23, 42]);
+        $this->drawText($commands, $amountRight, $summaryY + 78, (string) $data['simbolo'].' '.number_format((float) ($data['total'] ?? 0), 2, '.', ','), 8.4, true, $tealDark, 'right');
+
+        $lettersY = 644.0;
+        $this->drawBox($commands, $x, $lettersY, $w, 27, $border, [255, 255, 255], 0.8);
+        $this->drawText($commands, $x + 7, $lettersY + 17, 'IMPORTE EN LETRAS:', 6.5, true, $tealDark);
+        $this->drawText($commands, $x + 104, $lettersY + 17, $this->fitText((string) $data['monto_letras'], $w - 111, 6.6), 6.6, false, [30, 41, 59]);
+
+        $banksY = 677.0;
+        $this->drawBox($commands, $x, $banksY, $w, 70, $border, [255, 255, 255], 0.8);
+        $this->drawText($commands, $x + 7, $banksY + 13, 'CUENTAS BANCARIAS', 6.4, true, $tealDark);
+        $bankColumns = [$x + 7, $x + 150, $x + 226, $x + 395];
+        foreach ([['ENTIDAD FINANCIERA', 0], ['MONEDA', 1], ['NUMERO DE CUENTA', 2], ['CODIGO CCI', 3]] as $heading) {
+            $this->drawText($commands, $bankColumns[$heading[1]], $banksY + 27, $heading[0], 5.9, true, [30, 41, 59]);
+        }
+        /** @var array<int, array<string, string>> $bankAccounts */
+        $bankAccounts = is_array($data['cuentas_bancarias'] ?? null) ? $data['cuentas_bancarias'] : [];
+        $bankY = $banksY + 40;
+        foreach (array_slice($bankAccounts, 0, 3) as $account) {
+            $this->drawText($commands, $bankColumns[0], $bankY, $this->fitText((string) ($account['banco'] ?? '-'), 136, 5.9), 5.9, false, $muted);
+            $this->drawText($commands, $bankColumns[1], $bankY, $this->fitText((string) ($account['moneda'] ?? '-'), 68, 5.9), 5.9, false, $muted);
+            $this->drawText($commands, $bankColumns[2], $bankY, $this->fitText((string) ($account['cuenta'] ?? '-'), 160, 5.9), 5.9, false, $muted);
+            $this->drawText($commands, $bankColumns[3], $bankY, $this->fitText((string) ($account['cci'] ?? '-'), 145, 5.9), 5.9, false, $muted);
+            $bankY += 9.0;
+        }
+        if ($bankAccounts === []) {
+            $this->drawText($commands, $x + 7, $banksY + 45, 'No se registraron cuentas bancarias para este emisor.', 6.2, false, [100, 116, 139]);
+        }
+
+        $footerY = 754.0;
+        $qrW = 80.0;
+        $this->drawBox($commands, $x, $footerY, $qrW, 66, $border, [255, 255, 255], 0.8);
+        $this->drawQrCode($commands, (string) ($data['qr_content'] ?? ''), $x + 7, $footerY + 6, 54);
+        $infoX = $x + $qrW + 5;
+        $infoW = $w - $qrW - 5;
+        $this->drawBox($commands, $infoX, $footerY, $infoW, 66, $border, [255, 255, 255], 0.8);
+        $representation = ((string) ($data['tipo'] ?? '')) === 'TK'
+            ? 'Documento de venta interno - no SUNAT'
+            : 'Representacion impresa del comprobante electronico.';
+        $this->drawText($commands, $infoX + ($infoW / 2), $footerY + 19, $representation, 7, true, $tealDark, 'center');
+        $this->drawText($commands, $infoX + ($infoW / 2), $footerY + 34, $this->fitText('Consulte su comprobante con el numero '.(string) $data['numero'], $infoW - 16, 6.1), 6.1, false, $muted, 'center');
+        $this->drawText($commands, $infoX + 9, $footerY + 50, $this->fitText('HASH: '.(string) $data['hash'], $infoW - 18, 5.8), 5.8, false, $muted);
+        $this->drawText($commands, $infoX + 9, $footerY + 61, $this->fitText((string) $data['mensaje'], $infoW - 18, 5.8), 5.8, false, $muted);
+        $this->drawText($commands, $x + ($w / 2), 834, '*** AZURION FACTURADOR ***', 6.3, true, [30, 41, 59], 'center');
+
+        return implode("\n", $commands)."\n";
+    }
+
+    /**
+     * Version termica de 80 mm con la misma jerarquia visual del A4.
+     *
+     * @param array<string, mixed> $data
+     * @return array{content: string, width: float, height: float}
+     */
+    private function renderReferenceTicketPage(array $data): array
+    {
+        $width = self::TICKET_PAGE_WIDTH;
+        $x = self::TICKET_MARGIN;
+        $w = $width - (self::TICKET_MARGIN * 2);
+        $teal = [0, 132, 133];
+        $tealDark = [0, 91, 94];
+        $border = [77, 145, 147];
+        $muted = [55, 65, 81];
+
+        /** @var array<int, array<string, mixed>> $detalles */
+        $detalles = is_array($data['detalles'] ?? null) ? $data['detalles'] : [];
+        $rows = [];
+        $rowsHeight = 0.0;
+        foreach ($detalles as $row) {
+            $description = $this->joinNonEmpty([(string) ($row['codigo'] ?? '-'), (string) ($row['descripcion'] ?? '-')]);
+            $descLines = $this->wrapText($description, 104.0, 7.0);
+            $descLines = $descLines === [] ? ['-'] : $descLines;
+            $rowHeight = max(10.0, (count($descLines) * 7.6) + 3.0);
+            $rowsHeight += $rowHeight;
+            $rows[] = ['row' => $row, 'desc_lines' => $descLines, 'row_height' => $rowHeight];
+        }
+        $tableHeight = max(70.0, $rowsHeight + 20.0);
+        $pageHeight = max(500.0, min(1400.0, 429.0 + $tableHeight));
+        $this->currentPageHeight = $pageHeight;
+        $commands = [];
+        $y = self::TICKET_MARGIN;
+
+        $this->drawLogo($commands, (string) ($data['empresa_logo_ref'] ?? ''), $x + 2, $y + 1, 46, 36, (string) ($data['empresa_razon_social'] ?? ''), false);
+        $this->drawText($commands, $x + 53, $y + 12, $this->fitText((string) ($data['empresa_nombre_comercial'] ?? 'EMPRESA'), $w - 55, 8.4), 8.4, true, $tealDark);
+        $this->drawText($commands, $x + 53, $y + 24, $this->fitText((string) ($data['empresa_razon_social'] ?? '-'), $w - 55, 6.2), 6.2, false, [30, 41, 59]);
+        $this->drawText($commands, $x + 53, $y + 35, 'RUC: '.(string) ($data['empresa_ruc'] ?? '-'), 6.5, true, [30, 41, 59]);
+        $this->drawText($commands, $x + 2, $y + 48, $this->fitText((string) ($data['empresa_direccion'] ?? '-'), $w - 4, 5.9), 5.9, false, $muted);
+        $this->drawBox($commands, $x, $y + 56, $w, 20, $teal, $teal, 0.0);
+        $this->drawText($commands, $x + ($w / 2), $y + 70, (string) ($data['tipo_label'] ?? 'COMPROBANTE'), 7.2, true, [255, 255, 255], 'center');
+        $this->drawBox($commands, $x, $y + 76, $w, 30, $border, [255, 255, 255], 0.8);
+        $this->drawText($commands, $x + ($w / 2), $y + 96, (string) ($data['numero'] ?? '-'), 10.5, true, [15, 23, 42], 'center');
+
+        $y += 113;
+        $this->drawBox($commands, $x, $y, $w, 56, $border, [255, 255, 255], 0.8);
+        $this->drawText($commands, $x + 6, $y + 13, 'CLIENTE: '.$this->fitText((string) ($data['cliente_nombre'] ?? 'CLIENTES VARIOS'), $w - 48, 6.8), 6.8, true, [30, 41, 59]);
+        $this->drawText($commands, $x + 6, $y + 24, 'DOC: '.(string) ($data['cliente_tipo_doc'] ?? '0').' '.(string) ($data['cliente_num_doc'] ?? '-'), 6.5, false, $muted);
+        $this->drawText($commands, $x + 6, $y + 35, 'FECHA: '.(string) ($data['fecha_emision'] ?? '-'), 6.5, false, $muted);
+        $this->drawText($commands, $x + 6, $y + 46, 'MONEDA: '.(string) ($data['moneda'] ?? 'PEN').'  |  PAGO: '.(string) ($data['forma_pago'] ?? 'CONTADO'), 6.5, false, $muted);
+
+        $y += 62;
+        $this->drawBox($commands, $x, $y, $w, $tableHeight, $border, [255, 255, 255], 0.8);
+        $this->drawBox($commands, $x, $y, $w, 16, $teal, $teal, 0.0);
+        $colWidths = [12.0, $w - 88.0, 24.0, 28.0, 24.0];
+        $colLabels = ['#', 'DESCRIPCION', 'CANT', 'P.U.', 'IMP'];
+        $colX = [$x];
+        foreach ($colWidths as $colWidth) {
+            $colX[] = end($colX) + $colWidth;
+        }
+        foreach ($colX as $lineX) {
+            $this->drawLine($commands, $lineX, $y, $lineX, $y + $tableHeight, [202, 224, 225], 0.5);
+        }
+        foreach ($colLabels as $index => $label) {
+            $this->drawText($commands, $colX[$index] + ($colWidths[$index] / 2), $y + 11.5, $label, 6.4, true, [255, 255, 255], 'center');
+        }
+        $rowY = $y + 20;
+        foreach ($rows as $entry) {
+            $row = is_array($entry['row'] ?? null) ? $entry['row'] : [];
+            $descLines = is_array($entry['desc_lines'] ?? null) ? $entry['desc_lines'] : ['-'];
+            $rowHeight = (float) ($entry['row_height'] ?? 10.0);
+            $this->drawText($commands, $colX[0] + ($colWidths[0] / 2), $rowY + 7.5, (string) ($row['index'] ?? ''), 6.7, false, [30, 41, 59], 'center');
+            $descY = $rowY + 7.5;
+            foreach ($descLines as $line) {
+                $this->drawText($commands, $colX[1] + 2, $descY, (string) $line, 6.7, false, [30, 41, 59]);
+                $descY += 7.6;
+            }
+            $this->drawText($commands, $colX[2] + $colWidths[2] - 2, $rowY + 7.5, (string) ($row['cantidad_fmt'] ?? '0'), 6.7, false, [30, 41, 59], 'right');
+            $this->drawText($commands, $colX[3] + $colWidths[3] - 2, $rowY + 7.5, (string) ($row['precio_unitario_fmt'] ?? $row['valor_unitario_fmt'] ?? '0.00'), 6.7, false, [30, 41, 59], 'right');
+            $this->drawText($commands, $colX[4] + $colWidths[4] - 2, $rowY + 7.5, (string) ($row['total_fmt'] ?? '0.00'), 6.7, true, [15, 23, 42], 'right');
+            $this->drawLine($commands, $x, $rowY + $rowHeight, $x + $w, $rowY + $rowHeight, [225, 236, 237], 0.45);
+            $rowY += $rowHeight;
+        }
+        if ($rows === []) {
+            $this->drawText($commands, $x + ($w / 2), $y + 34, 'Sin items registrados', 7, false, [100, 116, 139], 'center');
+        }
+
+        $y += $tableHeight + 8;
+        $this->drawBox($commands, $x, $y, $w, 76, $border, [255, 255, 255], 0.8);
+        $left = $x + 6;
+        $right = $x + $w - 6;
+        foreach ([
+            ['SUB TOTAL', (float) ($data['sub_total'] ?? 0), 15.0],
+            ['IGV', (float) ($data['igv'] ?? 0), 27.0],
+            ['DESCUENTO', (float) ($data['descuento'] ?? 0), 39.0],
+        ] as $row) {
+            $this->drawText($commands, $left, $y + $row[2], $row[0], 7, true, [30, 41, 59]);
+            $this->drawText($commands, $right, $y + $row[2], (string) ($data['simbolo'] ?? 'S/').' '.number_format($row[1], 2, '.', ','), 7, false, [30, 41, 59], 'right');
+        }
+        $this->drawLine($commands, $left, $y + 48, $right, $y + 48, $border, 0.8);
+        $this->drawText($commands, $left, $y + 62, 'TOTAL', 8.5, true, [15, 23, 42]);
+        $this->drawText($commands, $right, $y + 62, (string) ($data['simbolo'] ?? 'S/').' '.number_format((float) ($data['total'] ?? 0), 2, '.', ','), 9, true, $tealDark, 'right');
+
+        $y += 82;
+        $this->drawBox($commands, $x, $y, $w, 36, $border, [255, 255, 255], 0.8);
+        $this->drawText($commands, $x + 5, $y + 12, 'IMPORTE EN LETRAS:', 6.1, true, $tealDark);
+        $letterLines = $this->wrapText((string) ($data['monto_letras'] ?? '-'), $w - 10, 6.0);
+        $letterY = $y + 23;
+        foreach (array_slice($letterLines, 0, 2) as $line) {
+            $this->drawText($commands, $x + 5, $letterY, $line, 6.0, false, $muted);
+            $letterY += 7.0;
+        }
+
+        $y += 44;
+        $this->drawBox($commands, $x, $y, $w, 105, $border, [255, 255, 255], 0.8);
+        $isInternalTicket = ((string) ($data['tipo'] ?? '')) === 'TK';
+        $representation = $isInternalTicket ? 'Documento de venta interno - no SUNAT' : 'Representacion impresa del comprobante electronico';
+        $representationColor = $isInternalTicket ? [185, 28, 28] : $tealDark;
+        $this->drawText($commands, $x + ($w / 2), $y + 13, $representation, 6.8, true, $representationColor, 'center');
+        $this->drawQrCode($commands, (string) ($data['qr_content'] ?? ''), $x + 7, $y + 21, 55.0);
+        $footerX = $x + 70;
+        $footerW = $w - 76;
+        $this->drawText($commands, $footerX, $y + 32, $this->fitText((string) ($data['numero'] ?? '-'), $footerW, 7.2), 7.2, true, [30, 41, 59]);
+        $this->drawText($commands, $footerX, $y + 46, $this->fitText('HASH: '.(string) ($data['hash'] ?? '-'), $footerW, 5.9), 5.9, false, $muted);
+        $this->drawText($commands, $footerX, $y + 59, $this->fitText((string) ($data['mensaje'] ?? '-'), $footerW, 5.9), 5.9, false, $muted);
+        $this->drawText($commands, $footerX, $y + 72, 'Generado: '.(string) ($data['generated_at'] ?? '-'), 5.7, false, [100, 116, 139]);
+        $this->drawLine($commands, $x + 6, $y + 82, $x + $w - 6, $y + 82, [202, 224, 225], 0.6);
+        $this->drawText($commands, $x + ($w / 2), $y + 96, '*** Gracias por su compra ***', 7, true, [30, 41, 59], 'center');
+
+        return ['content' => implode("\n", $commands)."\n", 'width' => $width, 'height' => $pageHeight];
     }
 
     /**
@@ -182,6 +567,14 @@ final class SimpleDocumentPdfGenerator implements DocumentPdfGenerator
             $this->drawText($commands, $textX, $addressY, $line, 7.4, false, [71, 85, 105]);
             $addressY += 9.5;
         }
+        $contact = $this->joinNonEmpty([
+            (string) ($data['empresa_telefono'] ?? '-'),
+            (string) ($data['empresa_correo'] ?? '-'),
+            (string) ($data['empresa_website'] ?? '-'),
+        ]);
+        if ($contact !== '') {
+            $this->drawText($commands, $textX, $y + 115, $this->fitText($contact, $textW, 6.6), 6.6, false, [71, 85, 105]);
+        }
 
         $docX = $x + $headerLeftW + $gap + 12;
         $docRightX = $x + $headerLeftW + $gap + $headerRightW - 12;
@@ -218,6 +611,13 @@ final class SimpleDocumentPdfGenerator implements DocumentPdfGenerator
             [71, 85, 105]
         );
         $this->drawText($commands, $x + 12, $y + 70, 'Direccion: '.$this->fitText((string) $data['cliente_direccion'], 305, 8), 8, false, [71, 85, 105]);
+        $clientContact = $this->joinNonEmpty([
+            (string) ($data['cliente_telefono'] ?? '-'),
+            (string) ($data['cliente_correo'] ?? '-'),
+        ]);
+        if ($clientContact !== '') {
+            $this->drawText($commands, $x + 180, $y + 55, $this->fitText($clientContact, 155, 7), 7, false, [71, 85, 105]);
+        }
 
         $metaX = $x + $headerLeftW + $gap + 12;
         $this->drawText($commands, $metaX, $y + 20, 'FORMA DE PAGO: '.(string) $data['forma_pago'], 8, true, [15, 23, 42]);
@@ -357,32 +757,39 @@ final class SimpleDocumentPdfGenerator implements DocumentPdfGenerator
 
         $this->drawBox($commands, $x, $y, $w, 126, [228, 236, 245], [255, 255, 255], 1.0);
         $this->drawBox($commands, $x, $y, $w, 20, [241, 245, 249], [241, 245, 249], 1.0);
-        $this->drawText($commands, $x + 10, $y + 14, 'Datos de validacion y observaciones', 8, true, [30, 41, 59]);
+        $this->drawText($commands, $x + 10, $y + 14, 'Validacion, cuentas y representacion impresa', 8, true, [30, 41, 59]);
 
-        $this->drawText($commands, $x + 10, $y + 36, 'Tipo: '.(string) $data['tipo_label'], 8, false, [51, 65, 85]);
-        $this->drawText($commands, $x + 180, $y + 36, 'Comprobante: '.(string) $data['numero'], 8, false, [51, 65, 85]);
-        $this->drawText($commands, $x + 390, $y + 36, 'Estado: '.(string) $data['estado'], 8, true, [8, 145, 178]);
+        $qrSize = 76.0;
+        $qrX = $x + 10;
+        $qrY = $y + 30;
+        $this->drawQrCode($commands, (string) ($data['qr_content'] ?? ''), $qrX, $qrY, $qrSize);
 
-        $this->drawText($commands, $x + 10, $y + 51, 'Hash: '.$this->fitText((string) $data['hash'], $w - 20, 7), 7, false, [71, 85, 105]);
-        $this->drawText($commands, $x + 10, $y + 65, 'Ticket SUNAT: '.$this->fitText((string) $data['ticket'], $w - 20, 7), 7, false, [71, 85, 105]);
+        $infoX = $qrX + $qrSize + 14;
+        $infoW = $w - $qrSize - 34;
+        $this->drawText($commands, $infoX, $y + 36, 'Comprobante: '.(string) $data['numero'], 8, true, [30, 41, 59]);
+        $this->drawText($commands, $infoX + 210, $y + 36, 'Estado: '.(string) $data['estado'], 8, true, [8, 145, 178]);
+        $this->drawText($commands, $infoX, $y + 50, 'Hash: '.$this->fitText((string) $data['hash'], $infoW, 6.7), 6.7, false, [71, 85, 105]);
 
-        $msgLines = $this->wrapText('Mensaje: '.(string) $data['mensaje'], $w - 20, 7.5);
-        $msgY = $y + 80;
-        foreach (array_slice($msgLines, 0, 3) as $line) {
-            $this->drawText($commands, $x + 10, $msgY, $line, 7.5, false, [51, 65, 85]);
-            $msgY += 10;
+        /** @var array<int, array<string, string>> $bankAccounts */
+        $bankAccounts = is_array($data['cuentas_bancarias'] ?? null) ? $data['cuentas_bancarias'] : [];
+        $bankY = $y + 65;
+        foreach (array_slice($bankAccounts, 0, 2) as $account) {
+            $bankLine = $this->joinNonEmpty([
+                $account['banco'] ?? '',
+                $account['moneda'] ?? '',
+                $account['cuenta'] ?? '',
+                isset($account['cci']) && $account['cci'] !== '' ? 'CCI '.$account['cci'] : '',
+            ]);
+            $this->drawText($commands, $infoX, $bankY, $this->fitText($bankLine, $infoW, 6.8), 6.8, false, [51, 65, 85]);
+            $bankY += 10;
         }
 
-        $this->drawText(
-            $commands,
-            $x + ($w / 2),
-            $y + 116,
-            'Representacion impresa del comprobante electronico',
-            8,
-            true,
-            [71, 85, 105],
-            'center'
-        );
+        $representation = ((string) ($data['tipo'] ?? '')) === 'TK'
+            ? 'Documento de venta interno. No es comprobante electronico SUNAT.'
+            : 'Representacion impresa del comprobante electronico.';
+        $this->drawText($commands, $infoX, $y + 92, $representation, 7.5, true, [51, 65, 85]);
+        $this->drawText($commands, $infoX, $y + 106, $this->fitText('Mensaje: '.(string) $data['mensaje'], $infoW, 6.8), 6.8, false, [71, 85, 105]);
+        $this->drawText($commands, $infoX, $y + 118, 'Generado: '.(string) $data['generated_at'], 6.5, false, [100, 116, 139]);
 
         return implode("\n", $commands)."\n";
     }
@@ -417,22 +824,27 @@ final class SimpleDocumentPdfGenerator implements DocumentPdfGenerator
         }
 
         $tableHeight = max(70.0, $rowsHeight + 20.0);
-        $pageHeight = max(360.0, min(1400.0, (self::TICKET_MARGIN * 2) + 142.0 + $tableHeight + 144.0));
+        $pageHeight = max(430.0, min(1400.0, (self::TICKET_MARGIN * 2) + 164.0 + $tableHeight + 208.0));
         $this->currentPageHeight = $pageHeight;
 
         $commands = [];
         $y = self::TICKET_MARGIN;
 
-        $this->drawBox($commands, $x, $y, $w, 70, [203, 213, 225], [255, 255, 255], 0.9);
+        $this->drawBox($commands, $x, $y, $w, 88, [203, 213, 225], [255, 255, 255], 0.9);
         $this->drawRect($commands, $x + 7, $y + 8, 34, 34, [223, 230, 240], [249, 250, 251], 0.6);
         $this->drawLogo($commands, (string) ($data['empresa_logo_ref'] ?? ''), $x + 10, $y + 11, 28, 28, (string) ($data['empresa_razon_social'] ?? ''), false);
         $this->drawText($commands, $x + 47, $y + 16, $this->fitText((string) ($data['empresa_nombre_comercial'] ?? 'EMPRESA'), $w - 55, 9), 9, true, [15, 23, 42]);
-        $this->drawText($commands, $x + 47, $y + 28, 'TICKET DE VENTA', 7.2, true, [8, 145, 178]);
+        $this->drawText($commands, $x + 47, $y + 28, (string) ($data['tipo_label'] ?? 'COMPROBANTE'), 7.2, true, [8, 145, 178]);
         $this->drawText($commands, $x + ($w / 2), $y + 44, (string) ($data['numero'] ?? '-'), 9, true, [15, 23, 42], 'center');
         $this->drawText($commands, $x + 6, $y + 55, 'RUC: '.(string) ($data['empresa_ruc'] ?? '-'), 7, false, [51, 65, 85]);
         $this->drawText($commands, $x + 6, $y + 64, 'Fecha: '.(string) ($data['fecha_emision'] ?? '-'), 7, false, [51, 65, 85]);
+        $this->drawText($commands, $x + 6, $y + 74, $this->fitText((string) ($data['empresa_direccion'] ?? '-'), $w - 12, 6.3), 6.3, false, [71, 85, 105]);
+        $this->drawText($commands, $x + 6, $y + 83, $this->fitText($this->joinNonEmpty([
+            (string) ($data['empresa_telefono'] ?? '-'),
+            (string) ($data['empresa_correo'] ?? '-'),
+        ]), $w - 12, 6.3), 6.3, false, [71, 85, 105]);
 
-        $y += 76;
+        $y += 94;
 
         $this->drawBox($commands, $x, $y, $w, 56, [226, 232, 240], [255, 255, 255], 0.8);
         $this->drawText($commands, $x + 6, $y + 13, 'Cliente: '.$this->fitText((string) ($data['cliente_nombre'] ?? 'CLIENTES VARIOS'), $w - 12, 7.2), 7.2, true, [30, 41, 59]);
@@ -453,7 +865,7 @@ final class SimpleDocumentPdfGenerator implements DocumentPdfGenerator
         $this->drawBox($commands, $x, $y, $w, $tableHeight, [203, 213, 225], [255, 255, 255], 0.8);
         $this->drawBox($commands, $x, $y, $w, 16, [8, 145, 178], [8, 145, 178], 0.8);
 
-        $colWidths = [12.0, 108.0, 24.0, 28.0, 24.0];
+        $colWidths = [12.0, $w - 88.0, 24.0, 28.0, 24.0];
         $colLabels = ['#', 'Descripcion', 'Cant', 'P.U.', 'Imp'];
         $colX = [$x];
         foreach ($colWidths as $colWidth) {
@@ -520,11 +932,22 @@ final class SimpleDocumentPdfGenerator implements DocumentPdfGenerator
 
         $y += 82;
 
-        $this->drawBox($commands, $x, $y, $w, 52, [226, 232, 240], [255, 255, 255], 0.8);
-        $this->drawText($commands, $x + ($w / 2), $y + 14, 'Operacion interna (ticket no SUNAT)', 7.2, true, [220, 38, 38], 'center');
-        $this->drawText($commands, $x + ($w / 2), $y + 26, $this->fitText((string) ($data['monto_letras'] ?? '-'), $w - 10, 7), 7, false, [51, 65, 85], 'center');
-        $this->drawText($commands, $x + ($w / 2), $y + 38, $this->fitText('Mensaje: '.(string) ($data['mensaje'] ?? '-'), $w - 10, 6.6), 6.6, false, [71, 85, 105], 'center');
-        $this->drawText($commands, $x + ($w / 2), $y + 48, 'Generado: '.(string) ($data['generated_at'] ?? '-'), 6.5, false, [100, 116, 139], 'center');
+        $this->drawBox($commands, $x, $y, $w, 112, [226, 232, 240], [255, 255, 255], 0.8);
+        $isInternalTicket = ((string) ($data['tipo'] ?? '')) === 'TK';
+        $representation = $isInternalTicket
+            ? 'Documento de venta interno - no SUNAT'
+            : 'Representacion impresa del comprobante electronico';
+        $representationColor = $isInternalTicket ? [220, 38, 38] : [8, 145, 178];
+        $this->drawText($commands, $x + ($w / 2), $y + 13, $representation, 6.8, true, $representationColor, 'center');
+        $this->drawQrCode($commands, (string) ($data['qr_content'] ?? ''), $x + 7, $y + 22, 58.0);
+        $footerX = $x + 72;
+        $footerW = $w - 78;
+        $this->drawText($commands, $footerX, $y + 31, $this->fitText((string) ($data['numero'] ?? '-'), $footerW, 7.2), 7.2, true, [30, 41, 59]);
+        $this->drawText($commands, $footerX, $y + 43, $this->fitText((string) ($data['monto_letras'] ?? '-'), $footerW, 6.4), 6.4, false, [51, 65, 85]);
+        $this->drawText($commands, $footerX, $y + 56, $this->fitText('Hash: '.(string) ($data['hash'] ?? '-'), $footerW, 6.1), 6.1, false, [71, 85, 105]);
+        $this->drawText($commands, $footerX, $y + 69, $this->fitText('Mensaje: '.(string) ($data['mensaje'] ?? '-'), $footerW, 6.1), 6.1, false, [71, 85, 105]);
+        $this->drawText($commands, $footerX, $y + 82, 'Generado: '.(string) ($data['generated_at'] ?? '-'), 6.0, false, [100, 116, 139]);
+        $this->drawText($commands, $x + ($w / 2), $y + 101, 'Gracias por su compra', 7.2, true, [30, 41, 59], 'center');
 
         return [
             'content' => implode("\n", $commands)."\n",
@@ -626,6 +1049,7 @@ final class SimpleDocumentPdfGenerator implements DocumentPdfGenerator
                 'unidad' => strtoupper($this->txt($item['unidad'] ?? 'NIU')),
                 'cantidad_fmt' => number_format($quantity, 2, '.', ','),
                 'valor_unitario_fmt' => number_format($valueUnit, 2, '.', ','),
+                'precio_unitario_fmt' => number_format($quantity > 0 ? ($lineTotal / $quantity) : 0, 2, '.', ','),
                 'descuento_fmt' => number_format($lineDiscount, 2, '.', ','),
                 'igv_fmt' => number_format($lineIgv, 2, '.', ','),
                 'total_fmt' => number_format($lineTotal, 2, '.', ','),
@@ -683,6 +1107,121 @@ final class SimpleDocumentPdfGenerator implements DocumentPdfGenerator
             return strtoupper((string) $formatter->toInvoice($total, 2, $currencyLabel));
         } catch (\Throwable) {
             return 'IMPORTE TOTAL EN '.$currencyLabel;
+        }
+    }
+
+    /**
+     * SUNAT usa estos datos como representacion QR del comprobante. Para tickets
+     * internos se conserva la misma estructura como identificador verificable.
+     *
+     * @param array<string, mixed> $data
+     */
+    private function buildQrContent(array $data): string
+    {
+        $date = (string) ($data['fecha_emision'] ?? '');
+        try {
+            $date = (new \DateTime($date))->format('Y-m-d');
+        } catch (\Throwable) {
+            $date = substr($date, 0, 10);
+        }
+
+        [$serie, $correlativo] = array_pad(explode('-', (string) ($data['numero'] ?? ''), 2), 2, '');
+
+        return implode('|', [
+            (string) ($data['empresa_ruc'] ?? ''),
+            (string) ($data['tipo'] ?? ''),
+            $serie,
+            $correlativo,
+            number_format((float) ($data['igv'] ?? 0), 2, '.', ''),
+            number_format((float) ($data['total'] ?? 0), 2, '.', ''),
+            $date,
+            (string) ($data['cliente_tipo_doc'] ?? '0'),
+            (string) ($data['cliente_num_doc'] ?? ''),
+        ]);
+    }
+
+    /**
+     * @param array<int, mixed> $accounts
+     * @return array<int, array{banco: string, moneda: string, cuenta: string, cci: string}>
+     */
+    private function normalizeBankAccounts(array $accounts): array
+    {
+        $normalized = [];
+        foreach ($accounts as $account) {
+            if (! is_array($account)) {
+                continue;
+            }
+
+            $bank = trim((string) ($account['banco'] ?? $account['entidad'] ?? ''));
+            $currency = strtoupper(trim((string) ($account['moneda'] ?? '')));
+            $number = trim((string) ($account['cuenta'] ?? $account['numero_cuenta'] ?? ''));
+            $cci = trim((string) ($account['cci'] ?? $account['codigo_interbancario'] ?? ''));
+            if ($bank === '' && $number === '' && $cci === '') {
+                continue;
+            }
+
+            $normalized[] = [
+                'banco' => $bank,
+                'moneda' => $currency,
+                'cuenta' => $number,
+                'cci' => $cci,
+            ];
+        }
+
+        return $normalized;
+    }
+
+    /**
+     * @param array<int, string> $values
+     */
+    private function joinNonEmpty(array $values): string
+    {
+        return implode(' | ', array_values(array_filter(
+            array_map(static fn (string $value): string => trim($value), $values),
+            static fn (string $value): bool => $value !== '' && $value !== '-'
+        )));
+    }
+
+    /**
+     * Dibuja el QR como vectores PDF para no depender de Imagick en produccion.
+     *
+     * @param array<int, string> $commands
+     */
+    private function drawQrCode(array &$commands, string $content, float $x, float $yTop, float $size): void
+    {
+        $payload = trim($content);
+        if ($payload === '') {
+            return;
+        }
+
+        try {
+            $matrix = Encoder::encode($payload, ErrorCorrectionLevel::M(), 'UTF-8', null, false)->getMatrix();
+        } catch (\Throwable) {
+            return;
+        }
+
+        $quietZone = 4;
+        $modules = $matrix->getWidth() + ($quietZone * 2);
+        $moduleSize = $size / max(1, $modules);
+        $this->drawBox($commands, $x, $yTop, $size, $size, [255, 255, 255], [255, 255, 255], 0.0);
+
+        for ($row = 0; $row < $matrix->getHeight(); $row++) {
+            for ($column = 0; $column < $matrix->getWidth(); $column++) {
+                if ($matrix->get($column, $row) !== 1) {
+                    continue;
+                }
+
+                $rectX = $x + (($column + $quietZone) * $moduleSize);
+                $rectYTop = $yTop + (($row + $quietZone) * $moduleSize);
+                $rectY = $this->currentPageHeight - $rectYTop - $moduleSize;
+                $commands[] = sprintf(
+                    '0 0 0 rg %.3f %.3f %.3f %.3f re f',
+                    $rectX,
+                    $rectY,
+                    $moduleSize + 0.04,
+                    $moduleSize + 0.04
+                );
+            }
         }
     }
 
@@ -872,11 +1411,25 @@ final class SimpleDocumentPdfGenerator implements DocumentPdfGenerator
         imagefilledrectangle($canvas, 0, 0, $width, $height, $white);
         imagecopy($canvas, $source, 0, 0, 0, 0, $width, $height);
 
+        // Muchos logos corporativos llegan con un lienzo blanco mucho mayor
+        // que el contenido. Recortarlo aqui permite mostrar el logo libre y a
+        // escala correcta sin alterar el archivo privado del tenant.
+        $output = $canvas;
+        $cropped = function_exists('imagecropauto')
+            ? @imagecropauto($canvas, IMG_CROP_THRESHOLD, 12.0, $white)
+            : false;
+        if ($cropped !== false && imagesx($cropped) > 4 && imagesy($cropped) > 4) {
+            $output = $cropped;
+        }
+
         ob_start();
-        imagejpeg($canvas, null, 88);
+        imagejpeg($output, null, 88);
         $jpeg = ob_get_clean();
 
         imagedestroy($source);
+        if ($output !== $canvas) {
+            imagedestroy($output);
+        }
         imagedestroy($canvas);
 
         return is_string($jpeg) && $jpeg !== '' ? $jpeg : null;

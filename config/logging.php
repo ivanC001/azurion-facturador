@@ -54,7 +54,7 @@ return [
 
         'stack' => [
             'driver' => 'stack',
-            'channels' => explode(',', (string) env('LOG_STACK', 'single')),
+            'channels' => explode(',', (string) env('LOG_STACK', 'daily')),
             'ignore_exceptions' => false,
         ],
 
@@ -76,14 +76,14 @@ return [
             'driver' => 'daily',
             'path' => storage_path('logs/sunat.log'),
             'level' => env('LOG_LEVEL', 'info'),
-            'days' => 30,
+            'days' => env('LOG_SUNAT_DAYS', 14),
             'replace_placeholders' => true,
         ],
         'audit' => [
             'driver' => 'daily',
             'path' => storage_path('logs/audit.log'),
             'level' => 'info',
-            'days' => 30,
+            'days' => env('LOG_AUDIT_DAYS', 14),
             'replace_placeholders' => true,
         ],
 
