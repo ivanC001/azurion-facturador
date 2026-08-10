@@ -12,18 +12,36 @@ final class TenantBillingLogoResolver
      */
     public function resolve(array $company): array
     {
-        if (trim((string) ($company['logo_pdf_url'] ?? $company['logo_url'] ?? '')) !== '') {
+        $needsLogo = trim((string) ($company['logo_pdf_url'] ?? $company['logo_url'] ?? '')) === '';
+        $needsBankAccounts = ! is_array($company['cuentas_bancarias'] ?? null);
+        if (! $needsLogo && ! $needsBankAccounts) {
             return $company;
         }
 
         try {
-            $logo = DB::table('configuracion_facturacion')->orderBy('id')->value('logo_pdf_url');
+            $config = DB::table('configuracion_facturacion')->orderBy('id')->first([
+                'logo_pdf_url',
+                'cuentas_bancarias',
+            ]);
         } catch (\Throwable) {
-            $logo = null;
+            try {
+                $logo = DB::table('configuracion_facturacion')->orderBy('id')->value('logo_pdf_url');
+                $config = (object) ['logo_pdf_url' => $logo];
+            } catch (\Throwable) {
+                $config = null;
+            }
         }
 
-        if (is_string($logo) && trim($logo) !== '') {
-            $company['logo_pdf_url'] = trim($logo);
+        if ($needsLogo && is_string($config->logo_pdf_url ?? null) && trim($config->logo_pdf_url) !== '') {
+            $company['logo_pdf_url'] = trim($config->logo_pdf_url);
+        }
+
+        if ($needsBankAccounts) {
+            $accounts = $config->cuentas_bancarias ?? null;
+            if (is_string($accounts) && trim($accounts) !== '') {
+                $accounts = json_decode($accounts, true);
+            }
+            $company['cuentas_bancarias'] = is_array($accounts) ? array_values($accounts) : [];
         }
 
         return $company;

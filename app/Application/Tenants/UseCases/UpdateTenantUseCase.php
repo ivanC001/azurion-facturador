@@ -117,6 +117,14 @@ final class UpdateTenantUseCase
                     'logos',
                     $savedConfig->logo_pdf_url ?? null,
                 ),
+                'serie_factura' => $savedConfig->serie_factura ?? null,
+                'serie_boleta' => $savedConfig->serie_boleta ?? null,
+                'serie_nc' => $savedConfig->serie_nc ?? null,
+                'serie_nd' => $savedConfig->serie_nd ?? null,
+                'serie_guia' => $savedConfig->serie_guia ?? null,
+                'igv' => isset($savedConfig->igv) ? (float) $savedConfig->igv : null,
+                'moneda' => $savedConfig->moneda ?? null,
+                'cuentas_bancarias' => $this->decodeBankAccounts($savedConfig->cuentas_bancarias ?? null),
             ],
         ];
     }
@@ -156,6 +164,13 @@ final class UpdateTenantUseCase
 
         if (array_key_exists('igv', $payload)) {
             $changes['igv'] = $payload['igv'];
+        }
+
+        if (array_key_exists('cuentas_bancarias', $payload)) {
+            $changes['cuentas_bancarias'] = json_encode(
+                array_values($payload['cuentas_bancarias']),
+                JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR,
+            );
         }
 
         $acceptsProductionCredentials = $targetSunatMode === Tenant::SUNAT_MODE_PRODUCTION;
@@ -292,6 +307,16 @@ final class UpdateTenantUseCase
 
         return str_contains($normalized, 'cert_test')
             || str_contains($normalized, 'ejemplo123456789');
+    }
+
+    /** @return list<array<string, string>> */
+    private function decodeBankAccounts(mixed $value): array
+    {
+        if (is_string($value) && trim($value) !== '') {
+            $value = json_decode($value, true);
+        }
+
+        return is_array($value) ? array_values($value) : [];
     }
 
 }

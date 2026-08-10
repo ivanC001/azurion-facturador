@@ -259,7 +259,7 @@ final class SimpleDocumentPdfGenerator implements DocumentPdfGenerator
         $this->drawBox($commands, $x, $tableY, $w, $tableH, $border, [255, 255, 255], 0.8);
         $this->drawBox($commands, $x, $tableY, $w, 21, $teal, $teal, 0.0);
         $colWidths = [286.0, 78.0, 58.0, 60.0, 65.0];
-        $colLabels = ['DESCRIPCION', 'UM SUNAT', 'CANTIDAD', 'PRECIO', 'IMPORTE'];
+        $colLabels = ['DESCRIPCION', 'MEDIDA', 'CANTIDAD', 'PRECIO', 'IMPORTE'];
         $colX = [$x];
         foreach ($colWidths as $width) {
             $colX[] = end($colX) + $width;
@@ -287,9 +287,9 @@ final class SimpleDocumentPdfGenerator implements DocumentPdfGenerator
             }
             $baseY = $currentY + 10.5;
             $this->drawText($commands, $colX[1] + ($colWidths[1] / 2), $baseY, $this->fitText((string) ($row['unidad'] ?? 'NIU'), $colWidths[1] - 6, 7), 7, false, [30, 41, 59], 'center');
-            $this->drawText($commands, $colX[2] + $colWidths[2] - 4, $baseY, (string) ($row['cantidad_fmt'] ?? '0.00'), 7, false, [30, 41, 59], 'right');
-            $this->drawText($commands, $colX[3] + $colWidths[3] - 4, $baseY, (string) ($row['precio_unitario_fmt'] ?? $row['valor_unitario_fmt'] ?? '0.00'), 7, false, [30, 41, 59], 'right');
-            $this->drawText($commands, $colX[4] + $colWidths[4] - 4, $baseY, (string) ($row['total_fmt'] ?? '0.00'), 7, true, [15, 23, 42], 'right');
+            $this->drawTextWithinWidth($commands, $colX[2] + $colWidths[2] - 4, $baseY, (string) ($row['cantidad_fmt'] ?? '0.00'), $colWidths[2] - 8, 7, false, [30, 41, 59], 'right');
+            $this->drawTextWithinWidth($commands, $colX[3] + $colWidths[3] - 4, $baseY, (string) ($row['precio_unitario_fmt'] ?? $row['valor_unitario_fmt'] ?? '0.00'), $colWidths[3] - 8, 7, false, [30, 41, 59], 'right');
+            $this->drawTextWithinWidth($commands, $colX[4] + $colWidths[4] - 4, $baseY, (string) ($row['total_fmt'] ?? '0.00'), $colWidths[4] - 8, 7, true, [15, 23, 42], 'right');
             $descY = $currentY + 9.5;
             foreach ($descLines as $line) {
                 $this->drawText($commands, $colX[0] + 4, $descY, $line, 7.2, false, [30, 41, 59]);
@@ -307,14 +307,26 @@ final class SimpleDocumentPdfGenerator implements DocumentPdfGenerator
         $leftSummaryW = 352.0;
         $rightSummaryX = $x + $leftSummaryW + $gap;
         $rightSummaryW = $w - $leftSummaryW - $gap;
+        $isInternalTicket = ((string) ($data['tipo'] ?? '')) === 'TK';
         $this->drawBox($commands, $x, $summaryY, $leftSummaryW, 82, $border, [255, 255, 255], 0.8);
         $this->drawBox($commands, $rightSummaryX, $summaryY, $rightSummaryW, 82, $border, [255, 255, 255], 0.8);
-        $this->drawText($commands, $x + 7, $summaryY + 14, 'CUENTA DETRACCIONES / CONDICIONES DE PAGO', 6.4, true, $tealDark);
+        $this->drawText(
+            $commands,
+            $x + 7,
+            $summaryY + 14,
+            $isInternalTicket ? 'CONDICIONES DE PAGO' : 'CUENTA DETRACCIONES / CONDICIONES DE PAGO',
+            6.4,
+            true,
+            $tealDark,
+        );
+        $traceability = $isInternalTicket
+            ? (string) $data['numero']
+            : $this->joinNonEmpty([(string) $data['ticket'], (string) $data['hash']]);
         $conditionRows = [
             ['FORMA DE PAGO:', (string) $data['forma_pago']],
             ['MONEDA:', (string) $data['moneda']],
             ['ESTADO:', (string) $data['estado']],
-            ['TICKET / HASH:', $this->joinNonEmpty([(string) $data['ticket'], (string) $data['hash']])],
+            [$isInternalTicket ? 'IDENTIFICADOR:' : 'TICKET / HASH:', $traceability !== '' ? $traceability : 'PENDIENTE DE SUNAT'],
         ];
         $conditionY = $summaryY + 30;
         foreach ($conditionRows as $row) {
@@ -361,11 +373,11 @@ final class SimpleDocumentPdfGenerator implements DocumentPdfGenerator
             $this->drawText($commands, $bankColumns[0], $bankY, $this->fitText((string) ($account['banco'] ?? '-'), 136, 5.9), 5.9, false, $muted);
             $this->drawText($commands, $bankColumns[1], $bankY, $this->fitText((string) ($account['moneda'] ?? '-'), 68, 5.9), 5.9, false, $muted);
             $this->drawText($commands, $bankColumns[2], $bankY, $this->fitText((string) ($account['cuenta'] ?? '-'), 160, 5.9), 5.9, false, $muted);
-            $this->drawText($commands, $bankColumns[3], $bankY, $this->fitText((string) ($account['cci'] ?? '-'), 145, 5.9), 5.9, false, $muted);
+            $this->drawText($commands, $bankColumns[3], $bankY, $this->fitText((string) ($account['cci'] ?? 'NO REGISTRADO'), 145, 5.9), 5.9, false, $muted);
             $bankY += 9.0;
         }
         if ($bankAccounts === []) {
-            $this->drawText($commands, $x + 7, $banksY + 45, 'No se registraron cuentas bancarias para este emisor.', 6.2, false, [100, 116, 139]);
+            $this->drawText($commands, $x + 7, $banksY + 45, 'Configura las cuentas en Configuracion > Facturador.', 6.2, false, [100, 116, 139]);
         }
 
         $footerY = 754.0;
@@ -375,12 +387,15 @@ final class SimpleDocumentPdfGenerator implements DocumentPdfGenerator
         $infoX = $x + $qrW + 5;
         $infoW = $w - $qrW - 5;
         $this->drawBox($commands, $infoX, $footerY, $infoW, 66, $border, [255, 255, 255], 0.8);
-        $representation = ((string) ($data['tipo'] ?? '')) === 'TK'
-            ? 'Documento de venta interno - no SUNAT'
+        $representation = $isInternalTicket
+            ? 'Documento de venta interno - No se registra en SUNAT'
             : 'Representacion impresa del comprobante electronico.';
         $this->drawText($commands, $infoX + ($infoW / 2), $footerY + 19, $representation, 7, true, $tealDark, 'center');
         $this->drawText($commands, $infoX + ($infoW / 2), $footerY + 34, $this->fitText('Consulte su comprobante con el numero '.(string) $data['numero'], $infoW - 16, 6.1), 6.1, false, $muted, 'center');
-        $this->drawText($commands, $infoX + 9, $footerY + 50, $this->fitText('HASH: '.(string) $data['hash'], $infoW - 18, 5.8), 5.8, false, $muted);
+        $footerReference = $isInternalTicket
+            ? 'REFERENCIA INTERNA: '.(string) $data['numero']
+            : 'HASH: '.(string) $data['hash'];
+        $this->drawText($commands, $infoX + 9, $footerY + 50, $this->fitText($footerReference, $infoW - 18, 5.8), 5.8, false, $muted);
         $this->drawText($commands, $infoX + 9, $footerY + 61, $this->fitText((string) $data['mensaje'], $infoW - 18, 5.8), 5.8, false, $muted);
         $this->drawText($commands, $x + ($w / 2), 834, '*** AZURION FACTURADOR ***', 6.3, true, [30, 41, 59], 'center');
 
@@ -403,15 +418,17 @@ final class SimpleDocumentPdfGenerator implements DocumentPdfGenerator
         $border = [77, 145, 147];
         $muted = [55, 65, 81];
 
+        $colWidths = [9.0, $w - 131.0, 28.0, 42.0, 52.0];
+
         /** @var array<int, array<string, mixed>> $detalles */
         $detalles = is_array($data['detalles'] ?? null) ? $data['detalles'] : [];
         $rows = [];
         $rowsHeight = 0.0;
         foreach ($detalles as $row) {
             $description = $this->joinNonEmpty([(string) ($row['codigo'] ?? '-'), (string) ($row['descripcion'] ?? '-')]);
-            $descLines = $this->wrapText($description, 104.0, 7.0);
+            $descLines = $this->wrapText($description, $colWidths[1] - 4, 6.4);
             $descLines = $descLines === [] ? ['-'] : $descLines;
-            $rowHeight = max(10.0, (count($descLines) * 7.6) + 3.0);
+            $rowHeight = max(10.0, (count($descLines) * 7.2) + 3.0);
             $rowsHeight += $rowHeight;
             $rows[] = ['row' => $row, 'desc_lines' => $descLines, 'row_height' => $rowHeight];
         }
@@ -441,7 +458,6 @@ final class SimpleDocumentPdfGenerator implements DocumentPdfGenerator
         $y += 62;
         $this->drawBox($commands, $x, $y, $w, $tableHeight, $border, [255, 255, 255], 0.8);
         $this->drawBox($commands, $x, $y, $w, 16, $teal, $teal, 0.0);
-        $colWidths = [12.0, $w - 88.0, 24.0, 28.0, 24.0];
         $colLabels = ['#', 'DESCRIPCION', 'CANT', 'P.U.', 'IMP'];
         $colX = [$x];
         foreach ($colWidths as $colWidth) {
@@ -458,15 +474,15 @@ final class SimpleDocumentPdfGenerator implements DocumentPdfGenerator
             $row = is_array($entry['row'] ?? null) ? $entry['row'] : [];
             $descLines = is_array($entry['desc_lines'] ?? null) ? $entry['desc_lines'] : ['-'];
             $rowHeight = (float) ($entry['row_height'] ?? 10.0);
-            $this->drawText($commands, $colX[0] + ($colWidths[0] / 2), $rowY + 7.5, (string) ($row['index'] ?? ''), 6.7, false, [30, 41, 59], 'center');
+            $this->drawText($commands, $colX[0] + ($colWidths[0] / 2), $rowY + 7.5, (string) ($row['index'] ?? ''), 6.2, false, [30, 41, 59], 'center');
             $descY = $rowY + 7.5;
             foreach ($descLines as $line) {
-                $this->drawText($commands, $colX[1] + 2, $descY, (string) $line, 6.7, false, [30, 41, 59]);
-                $descY += 7.6;
+                $this->drawText($commands, $colX[1] + 2, $descY, (string) $line, 6.4, false, [30, 41, 59]);
+                $descY += 7.2;
             }
-            $this->drawText($commands, $colX[2] + $colWidths[2] - 2, $rowY + 7.5, (string) ($row['cantidad_fmt'] ?? '0'), 6.7, false, [30, 41, 59], 'right');
-            $this->drawText($commands, $colX[3] + $colWidths[3] - 2, $rowY + 7.5, (string) ($row['precio_unitario_fmt'] ?? $row['valor_unitario_fmt'] ?? '0.00'), 6.7, false, [30, 41, 59], 'right');
-            $this->drawText($commands, $colX[4] + $colWidths[4] - 2, $rowY + 7.5, (string) ($row['total_fmt'] ?? '0.00'), 6.7, true, [15, 23, 42], 'right');
+            $this->drawTextWithinWidth($commands, $colX[2] + $colWidths[2] - 2, $rowY + 7.5, (string) ($row['cantidad_fmt'] ?? '0'), $colWidths[2] - 4, 6.7, false, [30, 41, 59], 'right');
+            $this->drawTextWithinWidth($commands, $colX[3] + $colWidths[3] - 2, $rowY + 7.5, (string) ($row['precio_unitario_fmt'] ?? $row['valor_unitario_fmt'] ?? '0.00'), $colWidths[3] - 4, 6.7, false, [30, 41, 59], 'right');
+            $this->drawTextWithinWidth($commands, $colX[4] + $colWidths[4] - 2, $rowY + 7.5, (string) ($row['total_fmt'] ?? '0.00'), $colWidths[4] - 4, 6.7, true, [15, 23, 42], 'right');
             $this->drawLine($commands, $x, $rowY + $rowHeight, $x + $w, $rowY + $rowHeight, [225, 236, 237], 0.45);
             $rowY += $rowHeight;
         }
@@ -510,7 +526,10 @@ final class SimpleDocumentPdfGenerator implements DocumentPdfGenerator
         $footerX = $x + 70;
         $footerW = $w - 76;
         $this->drawText($commands, $footerX, $y + 32, $this->fitText((string) ($data['numero'] ?? '-'), $footerW, 7.2), 7.2, true, [30, 41, 59]);
-        $this->drawText($commands, $footerX, $y + 46, $this->fitText('HASH: '.(string) ($data['hash'] ?? '-'), $footerW, 5.9), 5.9, false, $muted);
+        $footerReference = $isInternalTicket
+            ? 'REFERENCIA: '.(string) ($data['numero'] ?? '-')
+            : 'HASH: '.(string) ($data['hash'] ?? '-');
+        $this->drawText($commands, $footerX, $y + 46, $this->fitText($footerReference, $footerW, 5.9), 5.9, false, $muted);
         $this->drawText($commands, $footerX, $y + 59, $this->fitText((string) ($data['mensaje'] ?? '-'), $footerW, 5.9), 5.9, false, $muted);
         $this->drawText($commands, $footerX, $y + 72, 'Generado: '.(string) ($data['generated_at'] ?? '-'), 5.7, false, [100, 116, 139]);
         $this->drawLine($commands, $x + 6, $y + 82, $x + $w - 6, $y + 82, [202, 224, 225], 0.6);
@@ -935,7 +954,7 @@ final class SimpleDocumentPdfGenerator implements DocumentPdfGenerator
         $this->drawBox($commands, $x, $y, $w, 112, [226, 232, 240], [255, 255, 255], 0.8);
         $isInternalTicket = ((string) ($data['tipo'] ?? '')) === 'TK';
         $representation = $isInternalTicket
-            ? 'Documento de venta interno - no SUNAT'
+            ? 'Documento de venta interno - no se registra en SUNAT'
             : 'Representacion impresa del comprobante electronico';
         $representationColor = $isInternalTicket ? [220, 38, 38] : [8, 145, 178];
         $this->drawText($commands, $x + ($w / 2), $y + 13, $representation, 6.8, true, $representationColor, 'center');
@@ -1527,6 +1546,37 @@ final class SimpleDocumentPdfGenerator implements DocumentPdfGenerator
             $y,
             $safeText
         );
+    }
+
+    /**
+     * Ajusta solo la tipografia, nunca recorta importes ni cantidades.
+     * Esto mantiene cada valor dentro de su columna incluso en papel de 80 mm.
+     *
+     * @param array<int, string> $commands
+     * @param array<int, int> $rgb
+     */
+    private function drawTextWithinWidth(
+        array &$commands,
+        float $x,
+        float $yTop,
+        string $text,
+        float $maxWidth,
+        float $preferredSize,
+        bool $bold = false,
+        array $rgb = [17, 24, 39],
+        string $align = 'left',
+    ): void {
+        $fontSize = $preferredSize;
+        $estimatedWidth = $this->estimateTextWidth($this->ascii($text), $preferredSize);
+        if ($estimatedWidth > $maxWidth && $estimatedWidth > 0.0) {
+            $fontSize = floor(($preferredSize * $maxWidth / $estimatedWidth) * 100) / 100;
+            $fontSize = max(1.0, $fontSize);
+            while ($fontSize > 1.0 && $this->estimateTextWidth($this->ascii($text), $fontSize) > $maxWidth) {
+                $fontSize = round($fontSize - 0.01, 2);
+            }
+        }
+
+        $this->drawText($commands, $x, $yTop, $text, $fontSize, $bold, $rgb, $align);
     }
 
     /**

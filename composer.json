@@ -49,7 +49,7 @@
             "php artisan serve"
         ],
         "queue": [
-            "php artisan queue:work database --queue=sunat,default --tries=5 --timeout=120"
+            "php artisan queue:work --queue=sunat-production,sunat-beta,sunat,default --tries=5 --timeout=120"
         ],
         "test": [
             "@php artisan config:clear --ansi",

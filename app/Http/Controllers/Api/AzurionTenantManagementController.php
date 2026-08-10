@@ -113,6 +113,12 @@ final class AzurionTenantManagementController
             'serie_guia' => ['nullable', 'string', 'max:10'],
             'igv' => ['nullable', 'numeric'],
             'moneda' => ['nullable', 'string', 'size:3'],
+            'cuentas_bancarias' => ['nullable', 'array', 'max:3'],
+            'cuentas_bancarias.*' => ['array'],
+            'cuentas_bancarias.*.banco' => ['required', 'string', 'max:120'],
+            'cuentas_bancarias.*.moneda' => ['required', 'string', 'size:3', 'regex:/^[A-Za-z]{3}$/'],
+            'cuentas_bancarias.*.cuenta' => ['required', 'string', 'max:50', 'regex:/^[A-Za-z0-9 .-]+$/'],
+            'cuentas_bancarias.*.cci' => ['required', 'string', 'max:34', 'regex:/^[A-Za-z0-9 .-]+$/'],
             'logo_file_base64' => ['nullable', 'string', 'max:2800000'],
             'logo_file_name' => ['nullable', 'string', 'max:180'],
             'certificado_file_base64' => ['nullable', 'string', 'max:7000000'],
@@ -144,6 +150,18 @@ final class AzurionTenantManagementController
             $data['certificado_file_base64'],
             $data['certificado_file_name'],
         );
+
+        if (array_key_exists('cuentas_bancarias', $data)) {
+            $data['cuentas_bancarias'] = array_values(array_map(
+                static fn (array $account): array => [
+                    'banco' => trim((string) $account['banco']),
+                    'moneda' => strtoupper(trim((string) $account['moneda'])),
+                    'cuenta' => trim((string) $account['cuenta']),
+                    'cci' => trim((string) ($account['cci'] ?? '')),
+                ],
+                $data['cuentas_bancarias'],
+            ));
+        }
 
         return $data;
     }

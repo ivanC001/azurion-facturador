@@ -191,6 +191,7 @@ final class RegisterTenantUseCase
             'moneda' => $payload['moneda'] ?? 'PEN',
             'token_api' => null,
             'usa_datos_prueba' => $usesTestData,
+            'cuentas_bancarias' => array_values($payload['cuentas_bancarias'] ?? []),
         ];
     }
 
@@ -214,6 +215,10 @@ final class RegisterTenantUseCase
                 'igv' => $config['igv'],
                 'moneda' => $config['moneda'],
                 'token_api' => $config['token_api'],
+                'cuentas_bancarias' => json_encode(
+                    $config['cuentas_bancarias'],
+                    JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR,
+                ),
                 'updated_at' => now(),
                 'created_at' => now(),
             ],

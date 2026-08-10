@@ -133,7 +133,7 @@ SUNAT_PRODUCTION_QUEUE=sunat-production
 Un worker puede atender ambas colas con:
 
 ```bash
-php artisan queue:work --queue=sunat-production,sunat-beta,default
+php artisan queue:work --queue=sunat-production,sunat-beta,sunat,default
 ```
 
 Cada envio registra entorno, endpoint, cola, estado y codigo SUNAT en `storage/logs/sunat-AAAA-MM-DD.log`, sin escribir claves ni certificados.

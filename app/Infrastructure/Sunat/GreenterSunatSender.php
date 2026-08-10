@@ -766,6 +766,7 @@ final class GreenterSunatSender implements SunatSender
             'certificate_pem' => $certificatePem,
             'uses_test_credentials' => $usesTestCredentials,
             'logo_pdf_url' => is_string($row->logo_pdf_url ?? null) ? trim((string) $row->logo_pdf_url) : '',
+            'cuentas_bancarias' => $this->decodeBankAccounts($row->cuentas_bancarias ?? null),
         ];
     }
 
@@ -1094,6 +1095,11 @@ final class GreenterSunatSender implements SunatSender
         if (trim((string) ($empresa['logo_pdf_url'] ?? $empresa['logo_url'] ?? '')) === '' && trim((string) ($config['logo_pdf_url'] ?? '')) !== '') {
             $empresa['logo_pdf_url'] = trim((string) $config['logo_pdf_url']);
         }
+        if (! is_array($empresa['cuentas_bancarias'] ?? null)) {
+            $empresa['cuentas_bancarias'] = is_array($config['cuentas_bancarias'] ?? null)
+                ? $config['cuentas_bancarias']
+                : [];
+        }
 
         return [
             'estado' => $estado,
@@ -1104,5 +1110,15 @@ final class GreenterSunatSender implements SunatSender
             'documento' => $documentoPayload,
             'detalles' => (array) data_get($payload, 'detalles', []),
         ];
+    }
+
+    /** @return list<array<string, string>> */
+    private function decodeBankAccounts(mixed $value): array
+    {
+        if (is_string($value) && trim($value) !== '') {
+            $value = json_decode($value, true);
+        }
+
+        return is_array($value) ? array_values($value) : [];
     }
 }

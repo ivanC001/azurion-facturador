@@ -22,6 +22,12 @@ class SimpleDocumentPdfGeneratorTest extends TestCase
                 'ruc' => '20601234567',
                 'razon_social' => 'EMPRESA DEMO SAC',
                 'nombre_comercial' => 'DEMO STORE',
+                'cuentas_bancarias' => [[
+                    'banco' => 'BANCO DEMO',
+                    'moneda' => 'PEN',
+                    'cuenta' => '191-1234567-0-12',
+                    'cci' => '00219100123456789012',
+                ]],
                 'direccion' => [
                     'direccion' => 'AV. PRINCIPAL 123',
                     'distrito' => 'LIMA',
@@ -67,6 +73,8 @@ class SimpleDocumentPdfGeneratorTest extends TestCase
         $this->assertStringContainsString('BOLETA DE VENTA ELECTRONICA', $pdf);
         $this->assertStringContainsString('IMPORTE EN LETRAS', $pdf);
         $this->assertStringContainsString('CUENTAS BANCARIAS', $pdf);
+        $this->assertStringContainsString('BANCO DEMO', $pdf);
+        $this->assertStringContainsString('00219100123456789012', $pdf);
         $this->assertStringContainsString('COND. PAGO', $pdf);
         $this->assertStringContainsString('Representacion impresa', $pdf);
         $this->assertStringContainsString('TOTAL', $pdf);
@@ -115,6 +123,56 @@ class SimpleDocumentPdfGeneratorTest extends TestCase
         $this->assertStringContainsString('TICKET DE VENTA', $pdf);
         $this->assertStringContainsString('Documento de venta interno - no SUNAT', $pdf);
         $this->assertStringContainsString('TOTAL', $pdf);
+    }
+
+    public function test_thermal_item_columns_preserve_large_prices_without_overflowing_their_width(): void
+    {
+        $generator = $this->generator();
+
+        $pdf = $generator->generate([
+            'formato' => 'ticket',
+            'estado' => 'REGISTRADO',
+            'mensaje' => 'Ticket de venta registrado en facturador.',
+            'empresa' => [
+                'ruc' => '20601234567',
+                'razon_social' => 'EMPRESA DEMO SAC',
+            ],
+            'cliente' => [
+                'tipo_doc' => '0',
+                'num_doc' => '-',
+                'razon_social' => 'CLIENTES VARIOS',
+            ],
+            'documento' => [
+                'tipo' => 'TK',
+                'serie' => 'T001',
+                'correlativo' => '46',
+                'fecha_emision' => '2026-08-09 12:00:00',
+                'moneda' => 'PEN',
+                'valor_venta' => 987654321.25,
+                'igv_total' => 0.00,
+                'total' => 987654321.25,
+            ],
+            'detalles' => [[
+                'codigo' => 'PRD-000001',
+                'descripcion' => 'LLANTA CARRO',
+                'unidad' => 'NIU',
+                'cantidad' => 1,
+                'valor_unitario' => 987654321.25,
+                'igv' => 0,
+                'total' => 987654321.25,
+            ]],
+        ]);
+
+        $this->assertStringContainsString('987,654,321.25', $pdf);
+        $matched = preg_match_all(
+            '/\/F[12] ([0-9]+\.[0-9]+) Tf [^\r\n]*\(987,654,321\.25\) Tj/',
+            $pdf,
+            $amountCommands,
+        );
+
+        $this->assertGreaterThanOrEqual(2, $matched, 'El precio unitario y el importe deben conservarse completos.');
+        $fontSizes = array_map('floatval', $amountCommands[1]);
+        $this->assertLessThan(6.7, min($fontSizes), 'La columna estrecha debe reducir la tipografia del importe largo.');
     }
 
     public function test_every_sales_document_can_render_as_a4_or_thermal_without_changing_its_number(): void
@@ -186,6 +244,10 @@ class SimpleDocumentPdfGeneratorTest extends TestCase
         $this->assertStringContainsString('/MediaBox [0 0 595 842]', $ticketA4);
         $this->assertStringContainsString('TICKET DE VENTA', $ticketA4);
         $this->assertStringContainsString('TK01-25', $ticketA4);
+        $this->assertStringContainsString('IDENTIFICADOR:', $ticketA4);
+        $this->assertStringContainsString('REFERENCIA INTERNA: TK01-25', $ticketA4);
+        $this->assertStringNotContainsString('TICKET / HASH:', $ticketA4);
+        $this->assertStringNotContainsString('HASH: -', $ticketA4);
     }
 
     private function generator(): SimpleDocumentPdfGenerator

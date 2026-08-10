@@ -94,7 +94,18 @@ final class ShowTenantUseCase
             'serie_guia' => $row->serie_guia,
             'igv' => $row->igv,
             'moneda' => $row->moneda,
+            'cuentas_bancarias' => $this->decodeBankAccounts($row->cuentas_bancarias ?? null),
         ];
+    }
+
+    /** @return list<array<string, string>> */
+    private function decodeBankAccounts(mixed $value): array
+    {
+        if (is_string($value) && trim($value) !== '') {
+            $value = json_decode($value, true);
+        }
+
+        return is_array($value) ? array_values($value) : [];
     }
 
 }
