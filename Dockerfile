@@ -17,7 +17,10 @@ RUN apt-get update && apt-get install -y \
     && docker-php-ext-install pdo pdo_pgsql pcntl posix bcmath intl zip gd \
     && pecl install redis \
     && docker-php-ext-enable redis \
+<<<<<<< HEAD
     && apt-get purge -y --auto-remove $PHPIZE_DEPS \
+=======
+
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer

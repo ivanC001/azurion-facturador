@@ -8,11 +8,15 @@ use Illuminate\Support\Str;
 
 final class TenantSchemaManager
 {
+    private const PROVISIONING_CACHE_VERSION = 'v3';
+
     public function ensureProvisioned(string $schema): void
     {
-        Cache::remember(
-            'facturador:schema:provisioned:v2:'.$schema,
-            now()->addHours(6),
+        // Provisioning performs many DDL statements. It belongs to tenant
+        // onboarding and must not periodically slow down document emission.
+        // Bump the version whenever provision() adds a schema change.
+        Cache::rememberForever(
+            'facturador:schema:provisioned:'.self::PROVISIONING_CACHE_VERSION.':'.$schema,
             function () use ($schema): bool {
                 $this->provision($schema);
 
@@ -195,7 +199,10 @@ final class TenantSchemaManager
 
     private function markProvisioned(string $schema): void
     {
-        Cache::put('facturador:schema:provisioned:v2:'.$schema, true, now()->addHours(6));
+        Cache::forever(
+            'facturador:schema:provisioned:'.self::PROVISIONING_CACHE_VERSION.':'.$schema,
+            true,
+        );
     }
 
     private function indexName(string $schema, string $suffix): string
