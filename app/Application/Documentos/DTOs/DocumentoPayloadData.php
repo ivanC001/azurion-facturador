@@ -10,8 +10,7 @@ final class DocumentoPayloadData
         public readonly array $documento,
         public readonly array $detalles,
         public readonly array $sucursal = [],
-    ) {
-    }
+    ) {}
 
     public static function fromArray(array $payload): self
     {

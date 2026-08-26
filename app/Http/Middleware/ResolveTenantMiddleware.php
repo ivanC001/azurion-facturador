@@ -3,8 +3,8 @@
 namespace App\Http\Middleware;
 
 use App\Models\Tenant;
-use App\Support\Tenants\TenantIdentity;
 use App\Support\Tenants\TenantContext;
+use App\Support\Tenants\TenantIdentity;
 use Closure;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
@@ -12,9 +12,7 @@ use Symfony\Component\HttpFoundation\Response;
 
 final class ResolveTenantMiddleware
 {
-    public function __construct(private readonly TenantContext $tenantContext)
-    {
-    }
+    public function __construct(private readonly TenantContext $tenantContext) {}
 
     public function handle(Request $request, Closure $next): Response
     {

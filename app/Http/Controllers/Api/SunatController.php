@@ -4,12 +4,12 @@ namespace App\Http\Controllers\Api;
 
 use App\Application\Sunat\UseCases\DispatchSunatEnvioUseCase;
 use App\Application\Sunat\UseCases\GetSunatStatusUseCase;
+use App\Infrastructure\Tenant\TenantArtifactStorage;
 use App\Infrastructure\Tenant\TenantStoragePathResolver;
 use App\Models\Documento;
 use App\Support\ApiResponse;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Storage;
 
 final class SunatController
 {
@@ -17,8 +17,8 @@ final class SunatController
         private readonly DispatchSunatEnvioUseCase $dispatchSunatEnvioUseCase,
         private readonly GetSunatStatusUseCase $getSunatStatusUseCase,
         private readonly TenantStoragePathResolver $storagePathResolver,
-    ) {
-    }
+        private readonly TenantArtifactStorage $artifactStorage,
+    ) {}
 
     public function enviar(Request $request): JsonResponse
     {
@@ -53,9 +53,9 @@ final class SunatController
         $pdfPath = $this->storagePathResolver->pdfPath($baseName.'.pdf');
         $cdrPath = $this->storagePathResolver->cdrPath('R-'.$baseName.'.zip');
 
-        $xmlExists = Storage::disk(config('facturador.storage.disk', 'tenants'))->exists($xmlPath);
-        $pdfExists = Storage::disk(config('facturador.storage.disk', 'tenants'))->exists($pdfPath);
-        $cdrExists = Storage::disk(config('facturador.storage.disk', 'tenants'))->exists($cdrPath);
+        $xmlExists = $this->artifactStorage->exists($xmlPath);
+        $pdfExists = $this->artifactStorage->exists($pdfPath);
+        $cdrExists = $this->artifactStorage->exists($cdrPath);
 
         $baseUrl = rtrim(config('app.url'), '/');
         $tenantRuc = (string) ($status['empresa_ruc'] ?? '00000000000');

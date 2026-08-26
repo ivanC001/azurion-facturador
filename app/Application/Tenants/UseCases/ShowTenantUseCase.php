@@ -107,5 +107,4 @@ final class ShowTenantUseCase
 
         return is_array($value) ? array_values($value) : [];
     }
-
 }

@@ -6,9 +6,7 @@ use App\Domain\Documentos\Contracts\DocumentoRepository;
 
 final class GetDocumentoUseCase
 {
-    public function __construct(private readonly DocumentoRepository $documentoRepository)
-    {
-    }
+    public function __construct(private readonly DocumentoRepository $documentoRepository) {}
 
     public function execute(int $id): array
     {

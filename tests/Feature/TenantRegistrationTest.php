@@ -19,7 +19,7 @@ class TenantRegistrationTest extends TestCase
 
     public function test_it_registers_a_tenant_with_jwt_authentication(): void
     {
-        User::factory()->create([
+        User::factory()->platformAdmin()->create([
             'email' => 'test@example.com',
             'password' => bcrypt('password'),
         ]);
@@ -57,7 +57,7 @@ class TenantRegistrationTest extends TestCase
 
     public function test_it_is_idempotent_when_tenant_ruc_already_exists(): void
     {
-        User::factory()->create([
+        User::factory()->platformAdmin()->create([
             'email' => 'test@example.com',
             'password' => bcrypt('password'),
         ]);
@@ -152,5 +152,45 @@ class TenantRegistrationTest extends TestCase
         $this->withHeader('Authorization', 'Bearer '.$token)
             ->deleteJson('/api/tenants/'.$ownTenant->id)
             ->assertForbidden();
+    }
+
+    public function test_a_user_without_tenant_is_not_an_administrator_by_omission(): void
+    {
+        // Antes bastaba con no asignar tenant_id -- lo que hacian el seeder y
+        // la factory por defecto -- para acabar administrando todos los tenants.
+        User::factory()->create([
+            'email' => 'huerfano@example.com',
+            'password' => bcrypt('password'),
+            'tenant_id' => null,
+            'is_platform_admin' => false,
+        ]);
+
+        $this->postJson('/api/auth/login', [
+            'email' => 'huerfano@example.com',
+            'password' => 'password',
+            'tenant_id' => 1,
+        ])->assertUnauthorized();
+    }
+
+    public function test_revoking_the_role_invalidates_tokens_already_issued(): void
+    {
+        $admin = User::factory()->platformAdmin()->create([
+            'email' => 'admin@example.com',
+            'password' => bcrypt('password'),
+        ]);
+
+        $token = $this->postJson('/api/auth/login', [
+            'email' => 'admin@example.com',
+            'password' => 'password',
+            'tenant_id' => 1,
+        ])->json('data.token');
+
+        $admin->forceFill(['is_platform_admin' => false])->save();
+
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/tenants', [
+                'ruc' => '20601234567',
+                'business_name' => 'AZURION SAC',
+            ])->assertForbidden();
     }
 }

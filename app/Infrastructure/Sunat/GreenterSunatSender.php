@@ -2,12 +2,12 @@
 
 namespace App\Infrastructure\Sunat;
 
-use App\Support\Tenants\TenantPrivateFileReference;
-use App\Support\Sunat\SunatEnvironment;
 use App\Domain\Documentos\Enums\DocumentStatus;
-use App\Models\Documento;
 use App\Domain\Pdf\Contracts\DocumentPdfGenerator;
 use App\Domain\Sunat\Contracts\SunatSender;
+use App\Infrastructure\Tenant\TenantArtifactStorage;
+use App\Models\Documento;
+use App\Support\Sunat\SunatTestIdentity;
 use App\Support\Tenants\TenantContext;
 use DateTime;
 use Greenter\Model\Client\Client;
@@ -25,31 +25,32 @@ use Greenter\Model\DocumentInterface;
 use Greenter\Model\Sale\Charge;
 use Greenter\Model\Sale\Cuota;
 use Greenter\Model\Sale\Detraction;
+use Greenter\Model\Sale\FormaPagos\FormaPagoContado;
+use Greenter\Model\Sale\FormaPagos\FormaPagoCredito;
 use Greenter\Model\Sale\Invoice;
 use Greenter\Model\Sale\Legend;
 use Greenter\Model\Sale\Note;
 use Greenter\Model\Sale\Prepayment;
 use Greenter\Model\Sale\SaleDetail;
 use Greenter\Model\Sale\SalePerception;
-use Greenter\Model\Sale\FormaPagos\FormaPagoContado;
-use Greenter\Model\Sale\FormaPagos\FormaPagoCredito;
 use Greenter\Report\XmlUtils;
 use Greenter\See;
-use Illuminate\Support\Facades\Crypt;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Storage;
 use Luecano\NumeroALetras\NumeroALetras;
 
 final class GreenterSunatSender implements SunatSender
 {
-    private const TEST_SOL_RUC = '20000000001';
-    private const TEST_SOL_USER = 'MODDATOS';
-    private const TEST_SOL_PASSWORD = 'moddatos';
+    private const TEST_SOL_RUC = SunatTestIdentity::RUC;
+
+    private const TEST_SOL_USER = SunatTestIdentity::USER;
+
+    private const TEST_SOL_PASSWORD = SunatTestIdentity::PASSWORD;
 
     public function __construct(
         private readonly TenantContext $tenantContext,
         private readonly DocumentPdfGenerator $documentPdfGenerator,
+        private readonly TenantArtifactStorage $artifactStorage,
+        private readonly SunatEmissionConfigResolver $configResolver,
     ) {}
 
     public function send(Documento $documento): array
@@ -59,7 +60,7 @@ final class GreenterSunatSender implements SunatSender
             $payload = is_array($documento->payload) ? $documento->payload : [];
 
             $document = $this->buildGreenterDocument($documento, $payload);
-            $cfg = $this->resolveConfig($payload, $tenant->ruc, $tenant->sunatMode, (string) $documento->tipo_documento);
+            $cfg = $this->configResolver->resolve($tenant->ruc, $tenant->sunatMode, (string) $documento->tipo_documento);
 
             Log::channel('sunat')->info('Envio de documento a SUNAT.', [
                 'documento_id' => $documento->id,
@@ -69,7 +70,7 @@ final class GreenterSunatSender implements SunatSender
                 'credenciales' => $cfg['uses_test_credentials'] ? 'prueba_automatica' : 'tenant',
             ]);
 
-            $see = new See();
+            $see = new See;
             $see->setService($cfg['service']);
             $see->setCertificate($cfg['certificate_pem']);
             $see->setClaveSOL($cfg['sol_ruc'], $cfg['sol_user'], $cfg['sol_password']);
@@ -81,7 +82,7 @@ final class GreenterSunatSender implements SunatSender
                 throw new \RuntimeException('Greenter returned null response from SUNAT.');
             }
 
-            $hash = (new XmlUtils())->getHashSign($xmlSigned);
+            $hash = (new XmlUtils)->getHashSign($xmlSigned);
             $hash = $hash !== '' ? $hash : hash('sha256', $xmlSigned);
 
             if (! $result->isSuccess()) {
@@ -205,7 +206,7 @@ final class GreenterSunatSender implements SunatSender
                 $qty > 0 ? ($lineTotal / $qty) : $lineTotal,
             ));
 
-            $detail = (new SaleDetail())
+            $detail = (new SaleDetail)
                 ->setCodProducto((string) data_get($row, 'codigo', 'ITEM'.($idx + 1)))
                 ->setUnidad((string) data_get($row, 'unidad', 'NIU'))
                 ->setCantidad($qty)
@@ -325,12 +326,12 @@ final class GreenterSunatSender implements SunatSender
             if ($code === '' || $value === '') {
                 continue;
             }
-            $legendModels[] = (new Legend())
+            $legendModels[] = (new Legend)
                 ->setCode($code)
                 ->setValue($value);
         }
 
-        $invoice = (new Invoice())
+        $invoice = (new Invoice)
             ->setUblVersion('2.1')
             ->setTipoOperacion($tipoOperacion)
             ->setTipoDoc($tipoDoc)
@@ -410,7 +411,7 @@ final class GreenterSunatSender implements SunatSender
                 $invoice->setCuotas($cuotas);
             }
         } else {
-            $invoice->setFormaPago(new FormaPagoContado());
+            $invoice->setFormaPago(new FormaPagoContado);
         }
 
         return $invoice;
@@ -425,7 +426,7 @@ final class GreenterSunatSender implements SunatSender
 
         $currencyLabel = $this->resolveCurrencyLabel($currencyCode);
         try {
-            $formatter = new NumeroALetras();
+            $formatter = new NumeroALetras;
 
             return $formatter->toInvoice($documentTotal, 2, $currencyLabel);
         } catch (\Throwable) {
@@ -455,7 +456,7 @@ final class GreenterSunatSender implements SunatSender
 
         $invoiceLike = $this->buildInvoice($documento, $payload, $tipoDoc);
 
-        return (new Note())
+        return (new Note)
             ->setUblVersion('2.1')
             ->setTipoDoc($tipoDoc)
             ->setSerie((string) $documento->serie)
@@ -485,7 +486,7 @@ final class GreenterSunatSender implements SunatSender
         $guia = (array) data_get($payload, 'guia', []);
         $traslado = (array) data_get($payload, 'traslado', data_get($payload, 'documento.traslado', []));
 
-        $envio = (new Shipment())
+        $envio = (new Shipment)
             ->setModTraslado((string) data_get($traslado, 'modalidad', '01'))
             ->setCodTraslado((string) data_get($traslado, 'motivo_codigo', '01'))
             ->setDesTraslado((string) data_get($traslado, 'motivo_descripcion', 'VENTA'))
@@ -511,7 +512,7 @@ final class GreenterSunatSender implements SunatSender
             $envio->setChoferes($drivers);
         }
 
-        $despatch = (new Despatch())
+        $despatch = (new Despatch)
             ->setVersion((string) data_get($guia, 'version', '2022'))
             ->setTipoDoc('09')
             ->setSerie((string) $documento->serie)
@@ -550,7 +551,7 @@ final class GreenterSunatSender implements SunatSender
             return null;
         }
 
-        return (new Transportist())
+        return (new Transportist)
             ->setTipoDoc((string) ($data['tipo_doc'] ?? '6'))
             ->setNumDoc($numDoc)
             ->setRznSocial($name !== '' ? $name : 'TRANSPORTISTA')
@@ -564,7 +565,7 @@ final class GreenterSunatSender implements SunatSender
             return null;
         }
 
-        return (new Vehicle())
+        return (new Vehicle)
             ->setPlaca($placa)
             ->setNroCirculacion(isset($data['nro_circulacion']) ? (string) $data['nro_circulacion'] : null)
             ->setNroAutorizacion(isset($data['nro_autorizacion']) ? (string) $data['nro_autorizacion'] : null)
@@ -572,7 +573,7 @@ final class GreenterSunatSender implements SunatSender
     }
 
     /**
-     * @param array<int, array<string, mixed>> $drivers
+     * @param  array<int, array<string, mixed>>  $drivers
      * @return array<int, Driver>
      */
     private function buildDrivers(array $drivers, array $singleDriver): array
@@ -592,7 +593,7 @@ final class GreenterSunatSender implements SunatSender
                 continue;
             }
 
-            $items[] = (new Driver())
+            $items[] = (new Driver)
                 ->setTipo((string) ($driver['tipo'] ?? 'Principal'))
                 ->setTipoDoc((string) ($driver['tipo_doc'] ?? '1'))
                 ->setNroDoc($doc)
@@ -605,7 +606,7 @@ final class GreenterSunatSender implements SunatSender
     }
 
     /**
-     * @param array<int, array<string, mixed>> $rows
+     * @param  array<int, array<string, mixed>>  $rows
      * @return array<int, DespatchDetail>
      */
     private function buildDespatchDetails(array $rows): array
@@ -617,7 +618,7 @@ final class GreenterSunatSender implements SunatSender
                 continue;
             }
 
-            $details[] = (new DespatchDetail())
+            $details[] = (new DespatchDetail)
                 ->setCodigo((string) data_get($row, 'codigo', 'ITEM'.($idx + 1)))
                 ->setCodProdSunat((string) data_get($row, 'codigo_sunat', data_get($row, 'cod_prod_sunat', '')))
                 ->setDescripcion((string) data_get($row, 'descripcion', 'ITEM '.($idx + 1)))
@@ -626,7 +627,7 @@ final class GreenterSunatSender implements SunatSender
         }
 
         if ($details === []) {
-            $details[] = (new DespatchDetail())
+            $details[] = (new DespatchDetail)
                 ->setCodigo('ITEM1')
                 ->setDescripcion('ITEM DE GUIA')
                 ->setUnidad('NIU')
@@ -637,7 +638,7 @@ final class GreenterSunatSender implements SunatSender
     }
 
     /**
-     * @param array<int, array<string, mixed>> $rows
+     * @param  array<int, array<string, mixed>>  $rows
      * @return array<int, AdditionalDoc>
      */
     private function buildAdditionalDocs(array $rows, array $payload): array
@@ -663,7 +664,7 @@ final class GreenterSunatSender implements SunatSender
                 continue;
             }
 
-            $docs[] = (new AdditionalDoc())
+            $docs[] = (new AdditionalDoc)
                 ->setTipoDesc((string) ($row['tipo_descripcion'] ?? $row['tipo_desc'] ?? 'Documento relacionado'))
                 ->setTipo((string) ($row['tipo'] ?? '01'))
                 ->setNro($number)
@@ -677,7 +678,7 @@ final class GreenterSunatSender implements SunatSender
     {
         $addressData = (array) data_get($payload, 'empresa.direccion', []);
 
-        $address = (new Address())
+        $address = (new Address)
             ->setUbigueo((string) ($addressData['ubigeo'] ?? '150101'))
             ->setDepartamento((string) ($addressData['departamento'] ?? 'LIMA'))
             ->setProvincia((string) ($addressData['provincia'] ?? 'LIMA'))
@@ -687,7 +688,7 @@ final class GreenterSunatSender implements SunatSender
             ->setCodigoPais((string) ($addressData['codigo_pais'] ?? 'PE'))
             ->setCodLocal((string) ($addressData['cod_local'] ?? '0000'));
 
-        return (new Company())
+        return (new Company)
             ->setRuc((string) data_get($payload, 'empresa.ruc', '20000000001'))
             ->setRazonSocial((string) data_get($payload, 'empresa.razon_social', data_get($payload, 'empresa.nombre', 'EMPRESA TEST')))
             ->setNombreComercial((string) data_get($payload, 'empresa.nombre_comercial', data_get($payload, 'empresa.razon_social', 'EMPRESA TEST')))
@@ -696,7 +697,7 @@ final class GreenterSunatSender implements SunatSender
 
     private function buildClient(array $payload): Client
     {
-        $client = (new Client())
+        $client = (new Client)
             ->setTipoDoc((string) data_get($payload, 'cliente.tipo_doc', '6'))
             ->setNumDoc((string) data_get($payload, 'cliente.num_doc', '20100070970'))
             ->setRznSocial((string) data_get($payload, 'cliente.razon_social', data_get($payload, 'cliente.nombre', 'CLIENTE TEST')));
@@ -705,7 +706,7 @@ final class GreenterSunatSender implements SunatSender
         $ubigeo = trim((string) data_get($payload, 'cliente.ubigeo', ''));
         if ($direccion !== '' || $ubigeo !== '') {
             $client->setAddress(
-                (new Address())
+                (new Address)
                     ->setUbigueo($ubigeo !== '' ? $ubigeo : '150101')
                     ->setDireccion($direccion !== '' ? $direccion : 'DIRECCION NO ESPECIFICADA')
                     ->setCodigoPais('PE')
@@ -715,132 +716,13 @@ final class GreenterSunatSender implements SunatSender
         return $client;
     }
 
-    private function resolveConfig(array $payload, string $tenantRuc, string $tenantSunatMode, string $documentType): array
-    {
-        $row = DB::table('configuracion_facturacion')->orderBy('id')->first();
-
-        $serviceMode = strtolower(trim($tenantSunatMode));
-        if (! in_array($serviceMode, ['beta', 'production'], true)) {
-            throw new \RuntimeException('Modo SUNAT invalido o deshabilitado para el tenant.');
-        }
-
-        $storedMode = strtolower(trim((string) ($row->modo_sunat ?? '')));
-        if ($storedMode !== '' && $storedMode !== $serviceMode) {
-            Log::channel('sunat')->warning('Se ignoro un modo SUNAT interno inconsistente.', [
-                'modo_tenant' => $serviceMode,
-                'modo_configuracion' => $storedMode,
-            ]);
-        }
-
-        $service = $this->resolveSunatEndpoint($serviceMode, $documentType);
-
-        $usesTestCredentials = $serviceMode === 'beta';
-        $certificateField = trim((string) ($row->certificado_url ?? ''));
-
-        if ($usesTestCredentials) {
-            $solRuc = self::TEST_SOL_RUC;
-            $solUser = self::TEST_SOL_USER;
-            $solPassword = self::TEST_SOL_PASSWORD;
-        } else {
-            $solRuc = trim((string) ($row->ruc_sol ?? ''));
-            $solUser = trim((string) ($row->usuario_sol ?? ''));
-            $solPassword = $this->resolveSolPassword($row->clave_sol_encrypted ?? null);
-            $this->assertProductionSunatConfig($solRuc, $solUser, $solPassword, $certificateField);
-            if (! TenantPrivateFileReference::isProductionCertificateAvailable($tenantRuc, $certificateField)) {
-                throw new \RuntimeException('Modo production requiere un certificado digital real del tenant.');
-            }
-        }
-
-        $certificatePem = $this->resolveCertificatePem(
-            $tenantRuc,
-            $certificateField,
-            $usesTestCredentials,
-        );
-
-        return [
-            'mode' => $serviceMode,
-            'service' => $service,
-            'sol_ruc' => $solRuc,
-            'sol_user' => $solUser,
-            'sol_password' => $solPassword,
-            'certificate_pem' => $certificatePem,
-            'uses_test_credentials' => $usesTestCredentials,
-            'logo_pdf_url' => is_string($row->logo_pdf_url ?? null) ? trim((string) $row->logo_pdf_url) : '',
-            'cuentas_bancarias' => $this->decodeBankAccounts($row->cuentas_bancarias ?? null),
-        ];
-    }
-
-    private function assertProductionSunatConfig(string $solRuc, string $solUser, string $solPassword, string $certificateField): void
-    {
-        if (trim($solRuc) === '' || $solRuc === self::TEST_SOL_RUC) {
-            throw new \RuntimeException('Modo production requiere RUC SOL real; no se permite RUC SOL de prueba.');
-        }
-
-        if (trim($solUser) === '' || strtoupper(trim($solUser)) === self::TEST_SOL_USER) {
-            throw new \RuntimeException('Modo production requiere usuario SOL real; no se permite MODDATOS.');
-        }
-
-        if (trim($solPassword) === '' || trim($solPassword) === self::TEST_SOL_PASSWORD) {
-            throw new \RuntimeException('Modo production requiere clave SOL real; no se permite clave de prueba.');
-        }
-
-        if (trim($certificateField) === '') {
-            throw new \RuntimeException('Modo production requiere certificado digital real.');
-        }
-
-        $normalizedCert = strtolower(str_replace('\\', '/', $certificateField));
-        if (str_contains($normalizedCert, 'cert_test') || str_contains($normalizedCert, 'ejemplo123456789')) {
-            throw new \RuntimeException('Modo production no permite certificado de prueba.');
-        }
-    }
-
-    private function resolveSunatEndpoint(string $serviceMode, string $documentType): string
-    {
-        return SunatEnvironment::endpoint($serviceMode, $documentType)
-            ?? throw new \RuntimeException('No existe un endpoint SUNAT para el modo solicitado.');
-    }
-
-    private function resolveSolPassword(mixed $encrypted): string
-    {
-        if (! is_string($encrypted) || $encrypted === '') {
-            return '';
-        }
-
-        try {
-            return Crypt::decryptString($encrypted);
-        } catch (\Throwable) {
-            return '';
-        }
-    }
-
-    private function resolveCertificatePem(string $tenantRuc, string $certRef, bool $useTestCertificate): string
-    {
-        if ($useTestCertificate) {
-            $testCertificate = storage_path('certificates/ejemplo123456789.pem');
-            if (is_file($testCertificate)) {
-                return (string) file_get_contents($testCertificate);
-            }
-
-            throw new \RuntimeException('No se encontro el certificado de prueba SUNAT del servidor.');
-        }
-
-        if ($certRef !== '') {
-            $safeKey = TenantPrivateFileReference::safeKey($tenantRuc, 'certificados', $certRef);
-            if ($safeKey !== null && Storage::disk(config('facturador.storage.disk', 'tenants'))->exists($safeKey)) {
-                return (string) Storage::disk(config('facturador.storage.disk', 'tenants'))->get($safeKey);
-            }
-        }
-
-        throw new \RuntimeException('No certificate PEM found. Upload a certificate for the current tenant.');
-    }
-
     private function parseDate(mixed $value): DateTime
     {
         if (is_string($value) && $value !== '') {
             return new DateTime($value);
         }
 
-        return new DateTime();
+        return new DateTime;
     }
 
     private function toFloat(mixed $value): float
@@ -849,7 +731,7 @@ final class GreenterSunatSender implements SunatSender
     }
 
     /**
-     * @param array<string, mixed> $source
+     * @param  array<string, mixed>  $source
      */
     private function requiredFloat(array $source, string $field, string $path): float
     {
@@ -862,7 +744,7 @@ final class GreenterSunatSender implements SunatSender
     }
 
     /**
-     * @param array<string, mixed> $source
+     * @param  array<string, mixed>  $source
      */
     private function requiredString(array $source, string $field, string $path): string
     {
@@ -880,7 +762,7 @@ final class GreenterSunatSender implements SunatSender
     }
 
     /**
-     * @param array<int, array<string, mixed>> $rows
+     * @param  array<int, array<string, mixed>>  $rows
      * @return array<int, Charge>
      */
     private function buildCharges(array $rows, float $fallbackBase): array
@@ -904,7 +786,7 @@ final class GreenterSunatSender implements SunatSender
                 $factor = $monto / $base;
             }
 
-            $items[] = (new Charge())
+            $items[] = (new Charge)
                 ->setCodTipo($codTipo)
                 ->setMontoBase($base)
                 ->setFactor($factor > 0 ? $factor : null)
@@ -915,7 +797,7 @@ final class GreenterSunatSender implements SunatSender
     }
 
     /**
-     * @param array<int, Charge> $charges
+     * @param  array<int, Charge>  $charges
      */
     private function sumChargeMonto(array $charges): float
     {
@@ -928,7 +810,7 @@ final class GreenterSunatSender implements SunatSender
     }
 
     /**
-     * @param array<string, mixed> $percepcion
+     * @param  array<string, mixed>  $percepcion
      */
     private function buildPerception(array $percepcion, float $valorVenta, float $documentTotal): ?SalePerception
     {
@@ -946,7 +828,7 @@ final class GreenterSunatSender implements SunatSender
         $mto = $this->toFloat($percepcion['monto'] ?? $percepcion['mto'] ?? round($mtoBase * $porcentaje, 2));
         $mtoTotal = $this->toFloat($percepcion['monto_total'] ?? $percepcion['mto_total'] ?? ($documentTotal + $mto));
 
-        return (new SalePerception())
+        return (new SalePerception)
             ->setCodReg($codigo)
             ->setPorcentaje($porcentaje)
             ->setMtoBase($mtoBase)
@@ -955,7 +837,7 @@ final class GreenterSunatSender implements SunatSender
     }
 
     /**
-     * @param array<int, array<string, mixed>> $rows
+     * @param  array<int, array<string, mixed>>  $rows
      * @return array<int, Prepayment>
      */
     private function buildAnticipos(array $rows): array
@@ -974,7 +856,7 @@ final class GreenterSunatSender implements SunatSender
                 continue;
             }
 
-            $items[] = (new Prepayment())
+            $items[] = (new Prepayment)
                 ->setTipoDocRel($tipoDocRel)
                 ->setNroDocRel($nroDocRel)
                 ->setTotal($total);
@@ -984,7 +866,7 @@ final class GreenterSunatSender implements SunatSender
     }
 
     /**
-     * @param array<int, Prepayment> $anticipos
+     * @param  array<int, Prepayment>  $anticipos
      */
     private function sumAnticiposTotal(array $anticipos): float
     {
@@ -997,7 +879,7 @@ final class GreenterSunatSender implements SunatSender
     }
 
     /**
-     * @param array<string, mixed> $detraccion
+     * @param  array<string, mixed>  $detraccion
      */
     private function buildDetraccion(array $detraccion): ?Detraction
     {
@@ -1014,7 +896,7 @@ final class GreenterSunatSender implements SunatSender
             return null;
         }
 
-        $model = (new Detraction())
+        $model = (new Detraction)
             ->setCodBienDetraccion($codBien)
             ->setCodMedioPago($codMedioPago)
             ->setPercent($porcentaje)
@@ -1030,7 +912,7 @@ final class GreenterSunatSender implements SunatSender
     }
 
     /**
-     * @param array<int, array<string, mixed>> $rows
+     * @param  array<int, array<string, mixed>>  $rows
      * @return array<int, Cuota>
      */
     private function buildCuotas(array $rows): array
@@ -1048,7 +930,7 @@ final class GreenterSunatSender implements SunatSender
             }
 
             try {
-                $cuota = (new Cuota())
+                $cuota = (new Cuota)
                     ->setMonto($monto)
                     ->setFechaPago($this->parseDate($fechaRaw));
 
@@ -1067,7 +949,7 @@ final class GreenterSunatSender implements SunatSender
     }
 
     /**
-     * @param array<string, mixed> $documento
+     * @param  array<string, mixed>  $documento
      */
     private function resolveTipoOperacion(array $documento): string
     {
@@ -1113,12 +995,4 @@ final class GreenterSunatSender implements SunatSender
     }
 
     /** @return list<array<string, string>> */
-    private function decodeBankAccounts(mixed $value): array
-    {
-        if (is_string($value) && trim($value) !== '') {
-            $value = json_decode($value, true);
-        }
-
-        return is_array($value) ? array_values($value) : [];
-    }
 }

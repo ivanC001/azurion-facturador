@@ -14,6 +14,11 @@ return [
     'storage' => [
         'disk' => env('TENANT_STORAGE_DISK', 'tenants'),
     ],
+    'docs' => [
+        // Fuera de local/testing la documentacion OpenAPI responde 404 salvo
+        // que se abra de forma explicita para un entorno concreto.
+        'public' => (bool) env('L5_SWAGGER_PUBLIC', false),
+    ],
     'artifacts' => [
         // Los enlaces persistidos son solo referencias temporales. El historial
         // solicita una firma nueva al facturador cada vez que se consulta.

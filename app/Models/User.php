@@ -17,6 +17,9 @@ class User extends Authenticatable implements JWTSubject
     /**
      * The attributes that are mass assignable.
      *
+     * is_platform_admin queda deliberadamente fuera: es una concesion de
+     * privilegios y no debe poder llegar desde un payload de request.
+     *
      * @var list<string>
      */
     protected $fillable = [
@@ -49,7 +52,16 @@ class User extends Authenticatable implements JWTSubject
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
             'tenant_id' => 'integer',
+            'is_platform_admin' => 'boolean',
         ];
+    }
+
+    /**
+     * Administra todos los tenants del facturador.
+     */
+    public function isPlatformAdmin(): bool
+    {
+        return (bool) $this->getAttribute('is_platform_admin');
     }
 
     public function getJWTIdentifier()

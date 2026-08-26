@@ -7,6 +7,7 @@ use App\Domain\Documentos\Contracts\DocumentoRepository;
 use App\Domain\Documentos\Enums\DocumentStatus;
 use App\Domain\Documentos\Events\DocumentoProcesado;
 use App\Domain\Sunat\Contracts\SunatSender;
+use App\Infrastructure\Tenant\TenantArtifactStorage;
 use App\Infrastructure\Tenant\TenantStoragePathResolver;
 use App\Models\Documento;
 use App\Models\DocumentoSunat;
@@ -21,7 +22,6 @@ use Illuminate\Queue\Middleware\WithoutOverlapping;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use RuntimeException;
 use Throwable;
@@ -99,6 +99,7 @@ abstract class AbstractProcessSunatDocumentJob implements ShouldQueue
         TenantStoragePathResolver $storagePathResolver,
         TenantContext $tenantContext,
         AzurionVentaStatusNotifier $azurionVentaStatusNotifier,
+        TenantArtifactStorage $artifactStorage,
     ): void {
         try {
             $tenant = $this->resolveCurrentTenant();
@@ -164,15 +165,15 @@ abstract class AbstractProcessSunatDocumentJob implements ShouldQueue
             $baseName = $this->buildBaseName($documento);
 
             if (isset($result['xml'])) {
-                Storage::disk(config('facturador.storage.disk', 'tenants'))->put($storagePathResolver->xmlPath($baseName.'.xml'), $result['xml']);
+                $artifactStorage->put($storagePathResolver->xmlPath($baseName.'.xml'), $result['xml']);
             }
 
             if (isset($result['pdf'])) {
-                Storage::disk(config('facturador.storage.disk', 'tenants'))->put($storagePathResolver->pdfPath($baseName.'.pdf'), $result['pdf']);
+                $artifactStorage->put($storagePathResolver->pdfPath($baseName.'.pdf'), $result['pdf']);
             }
 
             if (isset($result['cdr'])) {
-                Storage::disk(config('facturador.storage.disk', 'tenants'))->put($storagePathResolver->cdrPath('R-'.$baseName.'.zip'), $result['cdr']);
+                $artifactStorage->put($storagePathResolver->cdrPath('R-'.$baseName.'.zip'), $result['cdr']);
             }
 
             $documento->refresh();

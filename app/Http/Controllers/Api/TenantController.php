@@ -10,9 +10,9 @@ use App\Application\Tenants\UseCases\ShowTenantUseCase;
 use App\Application\Tenants\UseCases\UpdateTenantUseCase;
 use App\Models\Tenant;
 use App\Support\ApiResponse;
-use Illuminate\Http\UploadedFile;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Validation\ValidationException;
 
 final class TenantController
@@ -228,5 +228,4 @@ final class TenantController
             ]);
         }
     }
-
 }

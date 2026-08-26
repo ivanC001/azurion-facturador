@@ -2,8 +2,8 @@
 
 namespace App\Console\Commands;
 
-use App\Models\Tenant;
 use App\Infrastructure\Tenant\TenantSchemaManager;
+use App\Models\Tenant;
 use Illuminate\Console\Command;
 
 class ProvisionTenantSchemaCommand extends Command

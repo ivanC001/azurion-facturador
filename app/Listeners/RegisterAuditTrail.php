@@ -8,9 +8,7 @@ use App\Infrastructure\Audit\AuditLogger;
 
 final class RegisterAuditTrail
 {
-    public function __construct(private readonly AuditLogger $auditLogger)
-    {
-    }
+    public function __construct(private readonly AuditLogger $auditLogger) {}
 
     public function onDocumentoRecibido(DocumentoRecibido $event): void
     {

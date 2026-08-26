@@ -4,15 +4,13 @@ namespace App\Application\Sunat\UseCases;
 
 use App\Jobs\ProcessSunatBetaDocumentJob;
 use App\Jobs\ProcessSunatProductionDocumentJob;
-use App\Support\Tenants\TenantContext;
 use App\Models\Tenant;
+use App\Support\Tenants\TenantContext;
 use Illuminate\Validation\ValidationException;
 
 final class DispatchSunatEnvioUseCase
 {
-    public function __construct(private readonly TenantContext $tenantContext)
-    {
-    }
+    public function __construct(private readonly TenantContext $tenantContext) {}
 
     public function execute(int $documentoId): void
     {

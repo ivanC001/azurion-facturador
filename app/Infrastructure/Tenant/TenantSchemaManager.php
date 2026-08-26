@@ -2,13 +2,14 @@
 
 namespace App\Infrastructure\Tenant;
 
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 final class TenantSchemaManager
 {
-    private const PROVISIONING_CACHE_VERSION = 'v3';
+    private const PROVISIONING_CACHE_VERSION = 'v4';
 
     public function ensureProvisioned(string $schema): void
     {
@@ -121,7 +122,6 @@ final class TenantSchemaManager
         DB::statement(sprintf('ALTER TABLE "%s"."configuracion_facturacion" ADD COLUMN IF NOT EXISTS moneda VARCHAR(3)', $schema));
         DB::statement(sprintf('ALTER TABLE "%s"."configuracion_facturacion" ADD COLUMN IF NOT EXISTS token_api VARCHAR(255)', $schema));
         DB::statement(sprintf('ALTER TABLE "%s"."configuracion_facturacion" ADD COLUMN IF NOT EXISTS cuentas_bancarias JSONB', $schema));
-        DB::statement(sprintf('UPDATE "%s"."configuracion_facturacion" SET certificado_password = NULL WHERE certificado_password IS NOT NULL', $schema));
 
         DB::statement(sprintf('ALTER TABLE "%s"."sucursales" ADD COLUMN IF NOT EXISTS codigo VARCHAR(30)', $schema));
         DB::statement(sprintf('ALTER TABLE "%s"."sucursales" ADD COLUMN IF NOT EXISTS numero INTEGER', $schema));
@@ -160,41 +160,69 @@ final class TenantSchemaManager
             $schema,
         ));
 
-        DB::statement(sprintf(
-            'UPDATE "%s"."documentos"
-                SET external_id = NULLIF(BTRIM(payload->\'documento\'->>\'external_id\'), \'\')
-              WHERE external_id IS NULL',
-            $schema,
-        ));
-        DB::statement(sprintf(
-            'WITH ranked AS (
-                SELECT id,
-                       ROW_NUMBER() OVER (PARTITION BY external_id ORDER BY id) AS position
-                  FROM "%s"."documentos"
-                 WHERE external_id IS NOT NULL
-            )
-            UPDATE "%s"."documentos" documento
-               SET external_id = NULL
-              FROM ranked
-             WHERE documento.id = ranked.id
-               AND ranked.position > 1',
-            $schema,
-            $schema,
-        ));
-
         DB::statement(sprintf('CREATE UNIQUE INDEX IF NOT EXISTS "%s" ON "%s"."sucursales" (codigo)', $this->indexName($schema, 'sucursales_codigo_unique'), $schema));
         DB::statement(sprintf('CREATE UNIQUE INDEX IF NOT EXISTS "%s" ON "%s"."sucursales" (numero)', $this->indexName($schema, 'sucursales_numero_unique'), $schema));
         DB::statement(sprintf('CREATE UNIQUE INDEX IF NOT EXISTS "%s" ON "%s"."series" (sucursal_codigo, tipo_documento)', $this->indexName($schema, 'series_sucursal_tipo_unique'), $schema));
         DB::statement(sprintf('CREATE INDEX IF NOT EXISTS "%s" ON "%s"."documentos" (id DESC)', $this->indexName($schema, 'documentos_id_desc_idx'), $schema));
         DB::statement(sprintf('CREATE INDEX IF NOT EXISTS "%s" ON "%s"."documentos" (estado, id DESC)', $this->indexName($schema, 'documentos_estado_id_idx'), $schema));
         DB::statement(sprintf('CREATE INDEX IF NOT EXISTS "%s" ON "%s"."documentos" (tipo_documento, id DESC)', $this->indexName($schema, 'documentos_tipo_id_idx'), $schema));
-        DB::statement(sprintf('CREATE INDEX IF NOT EXISTS "%s" ON "%s"."documentos" (tipo_documento, serie, correlativo)', $this->indexName($schema, 'documentos_tipo_serie_corr_idx'), $schema));
+        $this->ensureDocumentNumberUniqueness($schema);
         DB::statement(sprintf('CREATE INDEX IF NOT EXISTS "%s" ON "%s"."documentos" ((payload->\'documento\'->>\'external_id\'))', $this->indexName($schema, 'documentos_external_id_idx'), $schema));
         DB::statement(sprintf('CREATE UNIQUE INDEX IF NOT EXISTS "%s" ON "%s"."documentos" (external_id) WHERE external_id IS NOT NULL', $this->indexName($schema, 'documentos_external_id_unique'), $schema));
         DB::statement(sprintf('CREATE UNIQUE INDEX IF NOT EXISTS "%s" ON "%s"."documento_sunat" (documento_id)', $this->indexName($schema, 'documento_sunat_documento_unique'), $schema));
         DB::statement(sprintf('CREATE INDEX IF NOT EXISTS "%s" ON "%s"."auditoria" (documento_id)', $this->indexName($schema, 'auditoria_documento_idx'), $schema));
         DB::statement(sprintf('CREATE INDEX IF NOT EXISTS "%s" ON "%s"."auditoria" (action, performed_at DESC)', $this->indexName($schema, 'auditoria_action_performed_idx'), $schema));
         $this->markProvisioned($schema);
+    }
+
+    /**
+     * Un comprobante queda identificado por tipo + serie + correlativo, asi que
+     * ese trio debe ser unico: sin la restriccion, una carrera entre dos
+     * emisiones concurrentes se persiste en silencio y SUNAT rechaza la copia.
+     *
+     * Si el esquema ya arrastra duplicados, la restriccion no puede crearse.
+     * En ese caso se deja el indice no unico, se registra el incidente con el
+     * detalle de los numeros afectados y la emision sigue operativa: nunca se
+     * corrigen datos fiscales de forma automatica.
+     */
+    private function ensureDocumentNumberUniqueness(string $schema): void
+    {
+        $indexName = $this->indexName($schema, 'documentos_tipo_serie_corr_idx');
+        $uniqueIndexName = $this->indexName($schema, 'documentos_numero_unique');
+
+        DB::statement(sprintf(
+            'CREATE INDEX IF NOT EXISTS "%s" ON "%s"."documentos" (tipo_documento, serie, correlativo)',
+            $indexName,
+            $schema,
+        ));
+
+        $duplicates = DB::select(sprintf(
+            'SELECT tipo_documento, serie, correlativo, COUNT(*) AS total
+               FROM "%s"."documentos"
+              GROUP BY tipo_documento, serie, correlativo
+             HAVING COUNT(*) > 1
+              LIMIT 20',
+            $schema,
+        ));
+
+        if ($duplicates !== []) {
+            Log::channel('sunat')->error(
+                'El esquema del tenant tiene comprobantes con numero duplicado; '
+                .'no se pudo activar la restriccion de unicidad. Corrige los duplicados manualmente.',
+                [
+                    'schema' => $schema,
+                    'duplicados' => $duplicates,
+                ],
+            );
+
+            return;
+        }
+
+        DB::statement(sprintf(
+            'CREATE UNIQUE INDEX IF NOT EXISTS "%s" ON "%s"."documentos" (tipo_documento, serie, correlativo)',
+            $uniqueIndexName,
+            $schema,
+        ));
     }
 
     private function markProvisioned(string $schema): void

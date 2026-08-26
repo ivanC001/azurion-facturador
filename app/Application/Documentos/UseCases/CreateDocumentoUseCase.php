@@ -3,14 +3,15 @@
 namespace App\Application\Documentos\UseCases;
 
 use App\Application\Documentos\DTOs\DocumentoPayloadData;
+use App\Application\Sunat\UseCases\DispatchSunatEnvioUseCase;
 use App\Domain\Documentos\Contracts\DocumentoRepository;
 use App\Domain\Documentos\Events\DocumentoRecibido;
 use App\Domain\Pdf\Contracts\DocumentPdfGenerator;
-use App\Application\Sunat\UseCases\DispatchSunatEnvioUseCase;
 use App\Infrastructure\Pdf\TenantBillingLogoResolver;
+use App\Infrastructure\Tenant\TenantArtifactStorage;
 use App\Infrastructure\Tenant\TenantStoragePathResolver;
-use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Facades\URL;
+use App\Models\Documento;
+use App\Support\Documentos\SignedArtifactUrl;
 
 final class CreateDocumentoUseCase
 {
@@ -20,8 +21,8 @@ final class CreateDocumentoUseCase
         private readonly DocumentPdfGenerator $documentPdfGenerator,
         private readonly TenantStoragePathResolver $tenantStoragePathResolver,
         private readonly TenantBillingLogoResolver $tenantBillingLogoResolver,
-    ) {
-    }
+        private readonly TenantArtifactStorage $artifactStorage,
+    ) {}
 
     public function execute(DocumentoPayloadData $payload): array
     {
@@ -51,7 +52,7 @@ final class CreateDocumentoUseCase
     /**
      * @return array<string, mixed>
      */
-    private function responseFor(\App\Models\Documento $documento, bool $sendToSunat): array
+    private function responseFor(Documento $documento, bool $sendToSunat): array
     {
         $ruc = (string) data_get($documento->empresa, 'ruc', data_get($documento->payload, 'empresa.ruc', '00000000000'));
 
@@ -68,7 +69,7 @@ final class CreateDocumentoUseCase
         ];
     }
 
-    private function documentNumber(\App\Models\Documento $documento): string
+    private function documentNumber(Documento $documento): string
     {
         $correlativo = is_numeric($documento->correlativo)
             ? str_pad((string) $documento->correlativo, 8, '0', STR_PAD_LEFT)
@@ -79,14 +80,10 @@ final class CreateDocumentoUseCase
 
     private function signedArtifactUrl(string $routeName, int $documentId, string $ruc): string
     {
-        return URL::temporarySignedRoute(
-            $routeName,
-            now()->addMinutes(30),
-            ['id' => $documentId, 'tenant_ruc' => $ruc],
-        );
+        return SignedArtifactUrl::for($routeName, $documentId, $ruc);
     }
 
-    private function generateInitialPdf(\App\Models\Documento $documento, bool $sendToSunat): void
+    private function generateInitialPdf(Documento $documento, bool $sendToSunat): void
     {
         $payload = is_array($documento->payload) ? $documento->payload : [];
 
@@ -109,14 +106,13 @@ final class CreateDocumentoUseCase
 
         $pdfBinary = $this->documentPdfGenerator->generate($pdfContext);
         $baseName = $this->buildBaseName($documento);
-        Storage::disk(config('facturador.storage.disk', 'tenants'))->put($this->tenantStoragePathResolver->pdfPath($baseName.'.pdf'), $pdfBinary);
+        $this->artifactStorage->put($this->tenantStoragePathResolver->pdfPath($baseName.'.pdf'), $pdfBinary);
     }
 
-    private function buildBaseName(\App\Models\Documento $documento): string
+    private function buildBaseName(Documento $documento): string
     {
         $ruc = (string) data_get($documento->empresa, 'ruc', data_get($documento->payload, 'empresa.ruc', '00000000000'));
 
         return sprintf('%s-%s-%s-%s', $ruc, $documento->tipo_documento, $documento->serie, $documento->correlativo);
     }
-
 }

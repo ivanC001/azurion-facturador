@@ -3,23 +3,23 @@
 namespace App\Http\Controllers\Api;
 
 use App\Application\Documentos\DTOs\DocumentoPayloadData;
-use App\Application\Documentos\Services\DocumentoTaxPayloadValidator;
 use App\Application\Documentos\Services\DocumentEmissionPolicy;
+use App\Application\Documentos\Services\DocumentoTaxPayloadValidator;
 use App\Application\Documentos\UseCases\CreateDocumentoUseCase;
 use App\Application\Documentos\UseCases\GetDocumentoUseCase;
 use App\Application\Documentos\UseCases\ListDocumentosUseCase;
 use App\Domain\Pdf\Contracts\DocumentPdfGenerator;
-use App\Support\Ubigeos\UbigeoCatalog;
-use App\Infrastructure\Tenant\TenantStoragePathResolver;
 use App\Infrastructure\Pdf\TenantBillingLogoResolver;
+use App\Infrastructure\Tenant\TenantArtifactStorage;
+use App\Infrastructure\Tenant\TenantStoragePathResolver;
 use App\Support\ApiResponse;
+use App\Support\Documentos\SignedArtifactUrl;
+use App\Support\Ubigeos\UbigeoCatalog;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\URL;
+use Illuminate\Support\Facades\Log;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 final class DocumentoController
@@ -34,8 +34,8 @@ final class DocumentoController
         private readonly DocumentoTaxPayloadValidator $documentTaxPayloadValidator,
         private readonly DocumentEmissionPolicy $documentEmissionPolicy,
         private readonly TenantBillingLogoResolver $tenantBillingLogoResolver,
-    ) {
-    }
+        private readonly TenantArtifactStorage $artifactStorage,
+    ) {}
 
     public function index(Request $request): JsonResponse
     {
@@ -84,9 +84,9 @@ final class DocumentoController
                 ]);
             }
 
-            $pdfExists = Storage::disk(config('facturador.storage.disk', 'tenants'))->exists($this->storagePathResolver->pdfPath($baseName.'.pdf'));
-            $xmlExists = ! $isTicket && Storage::disk(config('facturador.storage.disk', 'tenants'))->exists($this->storagePathResolver->xmlPath($baseName.'.xml'));
-            $cdrExists = ! $isTicket && Storage::disk(config('facturador.storage.disk', 'tenants'))->exists($this->storagePathResolver->cdrPath('R-'.$baseName.'.zip'));
+            $pdfExists = $this->artifactStorage->exists($this->storagePathResolver->pdfPath($baseName.'.pdf'));
+            $xmlExists = ! $isTicket && $this->artifactStorage->exists($this->storagePathResolver->xmlPath($baseName.'.xml'));
+            $cdrExists = ! $isTicket && $this->artifactStorage->exists($this->storagePathResolver->cdrPath('R-'.$baseName.'.zip'));
 
             return array_merge($item, [
                 'pdf_url' => ($id > 0 && $pdfExists) ? $this->signedArtifactUrl('documentos.pdf', $id, $ruc) : null,
@@ -152,9 +152,9 @@ final class DocumentoController
             $documento['correlativo'],
         );
         $isTicket = strtoupper((string) $documento['tipo_documento']) === 'TK';
-        $xmlExists = ! $isTicket && Storage::disk(config('facturador.storage.disk', 'tenants'))->exists($this->storagePathResolver->xmlPath($baseName.'.xml'));
-        $pdfExists = Storage::disk(config('facturador.storage.disk', 'tenants'))->exists($this->storagePathResolver->pdfPath($baseName.'.pdf'));
-        $cdrExists = ! $isTicket && Storage::disk(config('facturador.storage.disk', 'tenants'))->exists($this->storagePathResolver->cdrPath('R-'.$baseName.'.zip'));
+        $xmlExists = ! $isTicket && $this->artifactStorage->exists($this->storagePathResolver->xmlPath($baseName.'.xml'));
+        $pdfExists = $this->artifactStorage->exists($this->storagePathResolver->pdfPath($baseName.'.pdf'));
+        $cdrExists = ! $isTicket && $this->artifactStorage->exists($this->storagePathResolver->cdrPath('R-'.$baseName.'.zip'));
 
         $ruc = (string) data_get($documento, 'payload.empresa.ruc', '00000000000');
 
@@ -261,16 +261,7 @@ final class DocumentoController
 
     private function signedArtifactUrl(string $routeName, int $documentId, string $ruc, ?string $pdfFormat = null): string
     {
-        $parameters = ['id' => $documentId, 'tenant_ruc' => $ruc];
-        if ($routeName === 'documentos.pdf' && $pdfFormat !== null) {
-            $parameters['formato'] = $pdfFormat;
-        }
-
-        return URL::temporarySignedRoute(
-            $routeName,
-            now()->addMinutes(30),
-            $parameters,
-        );
+        return SignedArtifactUrl::for($routeName, $documentId, $ruc, $pdfFormat);
     }
 
     private function applySalesDocumentRules(array $data, string $tipo): array
@@ -453,8 +444,7 @@ final class DocumentoController
         string $contentType,
         string $prefix = '',
         ?string $pdfFormat = null,
-    ): StreamedResponse
-    {
+    ): StreamedResponse {
         $documento = $this->getDocumentoUseCase->execute($id);
 
         $ruc = (string) data_get($documento, 'payload.empresa.ruc', '00000000000');
@@ -477,31 +467,37 @@ final class DocumentoController
             default => $this->storagePathResolver->cdrPath($legacyName),
         };
 
+        $generated = true;
         if ($type === 'pdf') {
-            $this->generatePdfOnDemand($documento, $primaryPath, $pdfFormat);
+            $generated = $this->generatePdfOnDemand($documento, $primaryPath, $pdfFormat);
         }
 
-        $path = Storage::disk(config('facturador.storage.disk', 'tenants'))->exists($primaryPath)
-            ? $primaryPath
-            : $legacyPath;
+        $path = $this->artifactStorage->exists($primaryPath) ? $primaryPath : $legacyPath;
 
-        abort_unless(Storage::disk(config('facturador.storage.disk', 'tenants'))->exists($path), 404, strtoupper($type).' not generated yet.');
+        abort_unless(
+            $this->artifactStorage->exists($path),
+            $generated ? 404 : 500,
+            $generated
+                ? strtoupper($type).' not generated yet.'
+                : 'No se pudo generar el '.strtoupper($type).' del comprobante.',
+        );
 
-        return Storage::disk(config('facturador.storage.disk', 'tenants'))->download($path, basename($path), [
-            'Content-Type' => $contentType,
-        ]);
+        return $this->artifactStorage->download($path, ['Content-Type' => $contentType]);
     }
 
-    private function generatePdfOnDemand(array $documento, string $targetPath, ?string $pdfFormat = null): void
+    /**
+     * @return bool false si la generacion fallo (no si simplemente no hacia falta)
+     */
+    private function generatePdfOnDemand(array $documento, string $targetPath, ?string $pdfFormat = null): bool
     {
-        $disk = Storage::disk(config('facturador.storage.disk', 'tenants'));
-        if ($disk->exists($targetPath)) {
-            return;
+        if ($this->artifactStorage->exists($targetPath)) {
+            return true;
         }
 
         try {
-            Cache::lock('pdf-generation:'.hash('sha256', $targetPath), 60)->block(15, function () use ($disk, $documento, $targetPath, $pdfFormat): void {
-                if ($disk->exists($targetPath)) {
+            Cache::lock('pdf-generation:'.hash('sha256', $targetPath), 60)->block(15, function () use ($documento, $targetPath, $pdfFormat): void {
+                // Otro proceso pudo generarlo mientras se esperaba el lock.
+                if ($this->artifactStorage->exists($targetPath)) {
                     return;
                 }
 
@@ -523,14 +519,21 @@ final class DocumentoController
                 ];
 
                 $pdfBinary = $this->documentPdfGenerator->generate($pdfContext);
-                $disk->put($targetPath, $pdfBinary);
+                $this->artifactStorage->put($targetPath, $pdfBinary);
             });
+
+            return true;
         } catch (\Throwable $exception) {
-            Log::warning('No se pudo generar PDF on-demand.', [
+            // No se propaga: puede existir una version anterior del PDF que
+            // todavia sirve. El fallo se registra completo para poder
+            // diagnosticarlo, en lugar de acabar en un 404 sin explicacion.
+            Log::error('No se pudo generar el PDF bajo demanda.', [
                 'documento_id' => $documento['id'] ?? null,
                 'target_path' => $targetPath,
-                'message' => $exception->getMessage(),
+                'exception' => $exception,
             ]);
+
+            return false;
         }
     }
 
@@ -547,5 +550,4 @@ final class DocumentoController
             default => 'Comprobante registrado en facturador.',
         };
     }
-
 }

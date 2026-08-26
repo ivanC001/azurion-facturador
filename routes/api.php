@@ -1,12 +1,12 @@
 <?php
 
 use App\Http\Controllers\Api\AuthController;
-use App\Http\Controllers\Api\DocumentoController;
-use App\Http\Controllers\Api\SunatController;
-use App\Http\Controllers\Api\SucursalController;
-use App\Http\Controllers\Api\TenantController;
-use App\Http\Controllers\Api\AzurionTenantProvisioningController;
 use App\Http\Controllers\Api\AzurionTenantManagementController;
+use App\Http\Controllers\Api\AzurionTenantProvisioningController;
+use App\Http\Controllers\Api\DocumentoController;
+use App\Http\Controllers\Api\SucursalController;
+use App\Http\Controllers\Api\SunatController;
+use App\Http\Controllers\Api\TenantController;
 use Illuminate\Support\Facades\Route;
 
 Route::prefix('auth')->group(function (): void {

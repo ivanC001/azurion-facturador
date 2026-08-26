@@ -24,8 +24,7 @@ final class AzurionTenantManagementController
         private readonly RegisterTenantUseCase $registerTenantUseCase,
         private readonly ShowTenantUseCase $showTenantUseCase,
         private readonly UpdateTenantUseCase $updateTenantUseCase,
-    ) {
-    }
+    ) {}
 
     public function index(Request $request): JsonResponse
     {

@@ -1,5 +1,11 @@
 <?php
 
+use App\Http\Middleware\ApiAuthenticationMiddleware;
+use App\Http\Middleware\AuditApiRequestMiddleware;
+use App\Http\Middleware\RequireAzurionIntegrationMiddleware;
+use App\Http\Middleware\RequireFacturadorManagementMiddleware;
+use App\Http\Middleware\ResolveTenantMiddleware;
+use App\Http\Middleware\SetTenantSearchPathMiddleware;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
@@ -16,22 +22,22 @@ return Application::configure(basePath: dirname(__DIR__))
     )
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->alias([
-            'auth.api' => App\Http\Middleware\ApiAuthenticationMiddleware::class,
-            'azurion.integration' => App\Http\Middleware\RequireAzurionIntegrationMiddleware::class,
-            'facturador.management' => App\Http\Middleware\RequireFacturadorManagementMiddleware::class,
-            'resolve.tenant' => App\Http\Middleware\ResolveTenantMiddleware::class,
-            'tenant.search_path' => App\Http\Middleware\SetTenantSearchPathMiddleware::class,
+            'auth.api' => ApiAuthenticationMiddleware::class,
+            'azurion.integration' => RequireAzurionIntegrationMiddleware::class,
+            'facturador.management' => RequireFacturadorManagementMiddleware::class,
+            'resolve.tenant' => ResolveTenantMiddleware::class,
+            'tenant.search_path' => SetTenantSearchPathMiddleware::class,
         ]);
         $middleware->appendToGroup('api', [
-            App\Http\Middleware\AuditApiRequestMiddleware::class,
+            AuditApiRequestMiddleware::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
-        $exceptions->shouldRenderJsonWhen(function (Request $request, \Throwable $e): bool {
+        $exceptions->shouldRenderJsonWhen(function (Request $request, Throwable $e): bool {
             return $request->is('api/*') || $request->expectsJson();
         });
 
-        $exceptions->render(function (\Throwable $e, Request $request) {
+        $exceptions->render(function (Throwable $e, Request $request) {
             if (! $request->is('api/*')) {
                 return null;
             }

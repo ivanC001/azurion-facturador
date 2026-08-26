@@ -14,4 +14,3 @@ interface DocumentoRepository
 
     public function markResult(Documento $documento, string $estado, ?string $ticket = null, ?string $hash = null): void;
 }
-

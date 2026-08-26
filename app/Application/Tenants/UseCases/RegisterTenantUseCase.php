@@ -2,30 +2,36 @@
 
 namespace App\Application\Tenants\UseCases;
 
+use App\Infrastructure\Tenant\TenantArtifactStorage;
+use App\Infrastructure\Tenant\TenantSchemaManager;
 use App\Models\ApiClient;
 use App\Models\Tenant;
-use App\Infrastructure\Tenant\TenantSchemaManager;
 use App\Support\Sunat\SunatEnvironment;
+use App\Support\Sunat\SunatTestIdentity;
 use App\Support\Tenants\TenantPrivateFileReference;
 use Greenter\XMLSecLibs\Certificate\X509Certificate;
 use Greenter\XMLSecLibs\Certificate\X509ContentType;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 
 final class RegisterTenantUseCase
 {
-    private const TEST_SOL_RUC = '20000000001';
-    private const TEST_SOL_USER = 'MODDATOS';
-    private const TEST_SOL_PASSWORD = 'moddatos';
+    private const TEST_SOL_RUC = SunatTestIdentity::RUC;
 
-    public function __construct(private readonly TenantSchemaManager $tenantSchemaManager)
-    {
-    }
+    private const TEST_SOL_USER = SunatTestIdentity::USER;
+
+    private const TEST_SOL_PASSWORD = SunatTestIdentity::PASSWORD;
+
+    private const ALLOWED_LOGO_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp'];
+
+    public function __construct(
+        private readonly TenantSchemaManager $tenantSchemaManager,
+        private readonly TenantArtifactStorage $artifactStorage,
+    ) {}
 
     public function execute(array $payload): array
     {
@@ -53,37 +59,65 @@ final class RegisterTenantUseCase
             ];
         }
 
-        $tenant = Tenant::query()->create([
-            'ruc' => $payload['ruc'],
-            'business_name' => $payload['business_name'],
-            'schema_name' => $schema,
-            'sunat_mode' => $payload['sunat_mode'] ?? Tenant::SUNAT_MODE_DISABLED,
-            'external_tenant_id' => $payload['external_tenant_id'] ?? null,
-            'country_code' => strtoupper((string) ($payload['country_code'] ?? 'PE')),
-            'tax_id' => $payload['tax_id'] ?? $payload['ruc'],
-            'document_mode' => ($payload['sunat_mode'] ?? Tenant::SUNAT_MODE_DISABLED) === Tenant::SUNAT_MODE_DISABLED
-                ? Tenant::DOCUMENT_MODE_TICKET_ONLY
-                : Tenant::DOCUMENT_MODE_ELECTRONIC,
-            'fiscal_status' => ($payload['sunat_mode'] ?? Tenant::SUNAT_MODE_DISABLED) === Tenant::SUNAT_MODE_DISABLED
-                ? Tenant::FISCAL_STATUS_NOT_CONFIGURED
-                : Tenant::FISCAL_STATUS_ACTIVE,
-            'is_active' => true,
-        ]);
+        $sunatMode = (string) ($payload['sunat_mode'] ?? Tenant::SUNAT_MODE_DISABLED);
 
-        $this->tenantSchemaManager->provision($schema);
+        // Se valida antes de crear nada: si las credenciales de production no
+        // son correctas, no debe quedar un tenant a medio dar de alta con su
+        // cliente API ya emitido.
+        if ($sunatMode === Tenant::SUNAT_MODE_PRODUCTION) {
+            $this->assertProductionConfig(
+                trim((string) ($payload['ruc_sol'] ?? '')),
+                trim((string) ($payload['usuario_sol'] ?? '')),
+                (string) ($payload['clave_sol'] ?? ''),
+                $payload,
+            );
+        }
 
         $plainApiKey = 'azf_'.Str::random(48);
+        $writtenFiles = [];
 
-        ApiClient::query()->create([
-            'tenant_id' => $tenant->id,
-            'name' => $payload['api_client_name'] ?? 'default-client',
-            'api_key_hash' => hash('sha256', $plainApiKey),
-            'is_active' => true,
-        ]);
+        try {
+            [$tenant, $config] = DB::transaction(function () use ($payload, $schema, $sunatMode, $plainApiKey, &$writtenFiles): array {
+                $tenant = Tenant::query()->create([
+                    'ruc' => $payload['ruc'],
+                    'business_name' => $payload['business_name'],
+                    'schema_name' => $schema,
+                    'sunat_mode' => $sunatMode,
+                    'external_tenant_id' => $payload['external_tenant_id'] ?? null,
+                    'country_code' => strtoupper((string) ($payload['country_code'] ?? 'PE')),
+                    'tax_id' => $payload['tax_id'] ?? $payload['ruc'],
+                    'document_mode' => $sunatMode === Tenant::SUNAT_MODE_DISABLED
+                        ? Tenant::DOCUMENT_MODE_TICKET_ONLY
+                        : Tenant::DOCUMENT_MODE_ELECTRONIC,
+                    'fiscal_status' => $sunatMode === Tenant::SUNAT_MODE_DISABLED
+                        ? Tenant::FISCAL_STATUS_NOT_CONFIGURED
+                        : Tenant::FISCAL_STATUS_ACTIVE,
+                    'is_active' => true,
+                ]);
 
-        $config = $this->buildConfigPayload($payload, $tenant->ruc, $tenant->sunat_mode);
-        $this->persistBillingConfig($schema, $config);
-        $this->forgetTenantCache($tenant->id, $tenant->ruc);
+                $this->tenantSchemaManager->provision($schema);
+
+                ApiClient::query()->create([
+                    'tenant_id' => $tenant->id,
+                    'name' => $payload['api_client_name'] ?? 'default-client',
+                    'api_key_hash' => hash('sha256', $plainApiKey),
+                    'is_active' => true,
+                ]);
+
+                $config = $this->buildConfigPayload($payload, $tenant->ruc, $tenant->sunat_mode, $writtenFiles);
+                $this->persistBillingConfig($schema, $config);
+
+                return [$tenant, $config];
+            });
+        } catch (\Throwable $exception) {
+            foreach ($writtenFiles as $path) {
+                $this->artifactStorage->disk()->delete($path);
+            }
+
+            throw $exception;
+        }
+
+        $this->forgetTenantCache($tenant);
 
         return [
             'tenant_id' => $tenant->id,
@@ -112,13 +146,13 @@ final class RegisterTenantUseCase
         ];
     }
 
-    private function forgetTenantCache(int $tenantId, string $ruc): void
+    private function forgetTenantCache(Tenant $tenant): void
     {
-        Cache::forget('facturador:tenant:id:'.$tenantId);
-        Cache::forget('facturador:tenant:ruc:'.$ruc);
-        $externalTenantId = Tenant::query()->whereKey($tenantId)->value('external_tenant_id');
-        if (is_string($externalTenantId) && $externalTenantId !== '') {
-            Cache::forget('facturador:tenant:external:'.$externalTenantId);
+        Cache::forget('facturador:tenant:id:'.$tenant->id);
+        Cache::forget('facturador:tenant:ruc:'.$tenant->ruc);
+
+        if (is_string($tenant->external_tenant_id) && $tenant->external_tenant_id !== '') {
+            Cache::forget('facturador:tenant:external:'.$tenant->external_tenant_id);
         }
     }
 
@@ -144,18 +178,21 @@ final class RegisterTenantUseCase
         return $base.'_'.$digits;
     }
 
-    private function buildConfigPayload(array $payload, string $tenantRuc, string $tenantSunatMode): array
+    /**
+     * @param  array<string, mixed>  $payload
+     * @param  list<string>  $writtenFiles  se rellena para poder deshacer
+     * @return array<string, mixed>
+     */
+    private function buildConfigPayload(array $payload, string $tenantRuc, string $tenantSunatMode, array &$writtenFiles): array
     {
         $rucSol = trim((string) ($payload['ruc_sol'] ?? ''));
         $usuarioSol = trim((string) ($payload['usuario_sol'] ?? ''));
         $claveSol = (string) ($payload['clave_sol'] ?? '');
-        $sunatMode = (string) ($payload['sunat_mode'] ?? $tenantSunatMode ?: Tenant::SUNAT_MODE_DISABLED);
+        $sunatMode = (string) ($payload['sunat_mode'] ?? ($tenantSunatMode ?: Tenant::SUNAT_MODE_DISABLED));
 
         $usesTestData = false;
 
-        if ($sunatMode === Tenant::SUNAT_MODE_PRODUCTION) {
-            $this->assertProductionConfig($rucSol, $usuarioSol, $claveSol, $payload);
-        } elseif ($sunatMode === Tenant::SUNAT_MODE_BETA) {
+        if ($sunatMode === Tenant::SUNAT_MODE_BETA) {
             $rucSol = self::TEST_SOL_RUC;
             $usuarioSol = self::TEST_SOL_USER;
             $claveSol = self::TEST_SOL_PASSWORD;
@@ -166,11 +203,11 @@ final class RegisterTenantUseCase
             $claveSol = '';
         }
 
-        $logoPath = $this->resolveLogo($tenantRuc, $payload);
+        $logoPath = $this->resolveLogo($tenantRuc, $payload, $writtenFiles);
         $certificatePath = match ($sunatMode) {
             Tenant::SUNAT_MODE_DISABLED => null,
-            Tenant::SUNAT_MODE_BETA => $this->resolveCertificatePem($tenantRuc, $payload, true)['path'],
-            default => $this->resolveCertificatePem($tenantRuc, $payload, false)['path'],
+            Tenant::SUNAT_MODE_BETA => $this->resolveCertificatePem($tenantRuc, $payload, true, $writtenFiles),
+            default => $this->resolveCertificatePem($tenantRuc, $payload, false, $writtenFiles),
         };
 
         return [
@@ -225,18 +262,29 @@ final class RegisterTenantUseCase
         );
     }
 
-    private function resolveLogo(string $tenantRuc, array $payload): ?string
+    /**
+     * @param  array<string, mixed>  $payload
+     * @param  list<string>  $writtenFiles
+     */
+    private function resolveLogo(string $tenantRuc, array $payload, array &$writtenFiles): ?string
     {
-        if (($payload['logo_file'] ?? null) instanceof UploadedFile) {
-            $ext = strtolower((string) $payload['logo_file']->getClientOriginalExtension());
-            $fileName = 'logo_'.now()->format('Ymd_His').'.'.$ext;
-            $path = $tenantRuc.'/logos/'.$fileName;
-            Storage::disk(config('facturador.storage.disk', 'tenants'))->putFileAs($tenantRuc.'/logos', $payload['logo_file'], $fileName);
+        $logo = $payload['logo_file'] ?? null;
 
-            return $path;
+        if (! $logo instanceof UploadedFile) {
+            return null;
         }
 
-        return null;
+        // La extension se deriva del contenido, no del nombre que envio el
+        // cliente; la validacion de la request ya acota los tipos aceptados.
+        $extension = strtolower((string) $logo->guessExtension());
+        $extension = in_array($extension, self::ALLOWED_LOGO_EXTENSIONS, true) ? $extension : 'png';
+
+        $fileName = 'logo_'.now()->format('Ymd_His').'.'.$extension;
+        $path = $tenantRuc.'/logos/'.$fileName;
+        $this->artifactStorage->putUploadedFile($tenantRuc.'/logos', $logo, $fileName);
+        $writtenFiles[] = $path;
+
+        return $path;
     }
 
     private function assertProductionConfig(string $rucSol, string $usuarioSol, string $claveSol, array $payload): void
@@ -270,47 +318,68 @@ final class RegisterTenantUseCase
         }
     }
 
-    private function resolveCertificatePem(string $tenantRuc, array $payload, bool $useTestCertificate): array
-    {
+    /**
+     * @param  array<string, mixed>  $payload
+     * @param  list<string>  $writtenFiles
+     */
+    private function resolveCertificatePem(
+        string $tenantRuc,
+        array $payload,
+        bool $useTestCertificate,
+        array &$writtenFiles,
+    ): string {
         if ($useTestCertificate) {
-            $fallbackPem = storage_path('certificates/ejemplo123456789.pem');
-            if (! is_file($fallbackPem)) {
+            if (! SunatTestIdentity::certificateExists()) {
                 throw new \RuntimeException('No se encontro el certificado de prueba SUNAT del servidor.');
             }
 
             $relative = $tenantRuc.'/certificados/cert_test.pem';
-            Storage::disk(config('facturador.storage.disk', 'tenants'))->put($relative, (string) file_get_contents($fallbackPem));
+            $this->artifactStorage->put($relative, (string) file_get_contents(SunatTestIdentity::certificatePath()));
+            $writtenFiles[] = $relative;
 
-            return ['path' => $relative];
+            return $relative;
         }
 
         $certFile = $payload['certificado_file'] ?? null;
 
-        if ($certFile instanceof UploadedFile) {
-            $ext = strtolower((string) $certFile->getClientOriginalExtension());
-            $pemContent = null;
-
-            if (in_array($ext, ['pfx', 'p12'], true)) {
-                $password = (string) ($payload['certificado_password'] ?? '');
-                $pemContent = $this->convertPfxToPem((string) $certFile->get(), $password);
-            } else {
-                $pemContent = (string) $certFile->get();
-            }
-
-            $fileName = 'cert_'.now()->format('Ymd_His').'.pem';
-            $relative = $tenantRuc.'/certificados/'.$fileName;
-            Storage::disk(config('facturador.storage.disk', 'tenants'))->put($relative, $pemContent);
-
-            return ['path' => $relative];
+        if (! $certFile instanceof UploadedFile) {
+            return '';
         }
 
-        return ['path' => ''];
+        $relative = $tenantRuc.'/certificados/cert_'.now()->format('Ymd_His').'.pem';
+        $this->artifactStorage->put($relative, $this->certificatePem($certFile, $payload));
+        $writtenFiles[] = $relative;
+
+        return $relative;
     }
 
-    private function convertPfxToPem(string $pfxContent, string $password): string
+    /**
+     * Una clave de contenedor incorrecta es un error del cliente, no un fallo
+     * del servidor: se traduce a un 422 con el campo concreto.
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    private function certificatePem(UploadedFile $certFile, array $payload): string
     {
-        $certificate = new X509Certificate($pfxContent, $password);
+        $extension = strtolower((string) $certFile->getClientOriginalExtension());
 
-        return (string) $certificate->export(X509ContentType::PEM);
+        if (! in_array($extension, ['pfx', 'p12'], true)) {
+            return (string) $certFile->get();
+        }
+
+        try {
+            $certificate = new X509Certificate(
+                (string) $certFile->get(),
+                (string) ($payload['certificado_password'] ?? ''),
+            );
+
+            return (string) $certificate->export(X509ContentType::PEM);
+        } catch (\Throwable) {
+            throw ValidationException::withMessages([
+                'certificado_password' => [
+                    'No se pudo abrir el certificado: revisa la clave del contenedor .pfx/.p12.',
+                ],
+            ]);
+        }
     }
 }

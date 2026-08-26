@@ -28,4 +28,3 @@ class ProcessSunatDocumentJob extends AbstractProcessSunatDocumentJob
         );
     }
 }
-

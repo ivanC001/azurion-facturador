@@ -10,12 +10,10 @@ use Illuminate\Support\Str;
 
 final class ProvisionTenantFromAzurionUseCase
 {
-    public function __construct(private readonly TenantSchemaManager $tenantSchemaManager)
-    {
-    }
+    public function __construct(private readonly TenantSchemaManager $tenantSchemaManager) {}
 
     /**
-     * @param array<string, mixed> $payload
+     * @param  array<string, mixed>  $payload
      * @return array<string, mixed>
      */
     public function execute(string $externalTenantId, array $payload): array
@@ -45,7 +43,7 @@ final class ProvisionTenantFromAzurionUseCase
                     : 'EXT-'.strtoupper(substr(hash('sha256', $externalTenantId), 0, 24));
 
                 if ($tenant === null) {
-                    $tenant = new Tenant();
+                    $tenant = new Tenant;
                     $tenant->external_tenant_id = $externalTenantId;
                     $tenant->schema_name = $this->schemaName($externalTenantId);
                     $tenant->sunat_mode = Tenant::SUNAT_MODE_DISABLED;

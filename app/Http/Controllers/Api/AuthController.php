@@ -9,9 +9,7 @@ use Illuminate\Http\Request;
 
 final class AuthController
 {
-    public function __construct(private readonly LoginUseCase $loginUseCase)
-    {
-    }
+    public function __construct(private readonly LoginUseCase $loginUseCase) {}
 
     public function login(Request $request): JsonResponse
     {

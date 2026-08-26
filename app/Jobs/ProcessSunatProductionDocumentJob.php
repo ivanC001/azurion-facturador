@@ -20,4 +20,3 @@ final class ProcessSunatProductionDocumentJob extends AbstractProcessSunatDocume
         );
     }
 }
-

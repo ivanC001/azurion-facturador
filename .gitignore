@@ -9,7 +9,6 @@
 /.idea
 /.nova
 /.phpunit.cache
-/.vscode
 /.zed
 /auth.json
 /node_modules
@@ -22,3 +21,11 @@
 Homestead.json
 Homestead.yaml
 Thumbs.db
+
+# Artefactos de trabajo generados en local
+/output
+/tmp
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat
+.gitignore

@@ -252,7 +252,7 @@ class SimpleDocumentPdfGeneratorTest extends TestCase
 
     private function generator(): SimpleDocumentPdfGenerator
     {
-        $context = new TenantContext();
+        $context = new TenantContext;
         $context->set(new TenantIdentity(
             tenantId: 1,
             ruc: '20601234567',

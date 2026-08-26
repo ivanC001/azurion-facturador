@@ -2,15 +2,15 @@
 
 namespace App\Providers;
 
-use App\Listeners\RegisterAuditTrail;
+use App\Domain\Documentos\Contracts\DocumentoRepository;
 use App\Domain\Documentos\Events\DocumentoProcesado;
 use App\Domain\Documentos\Events\DocumentoRecibido;
-use App\Domain\Documentos\Contracts\DocumentoRepository;
 use App\Domain\Pdf\Contracts\DocumentPdfGenerator;
+use App\Domain\Sunat\Contracts\SunatSender;
 use App\Infrastructure\Pdf\SimpleDocumentPdfGenerator;
 use App\Infrastructure\Persistence\Repositories\EloquentDocumentoRepository;
-use App\Domain\Sunat\Contracts\SunatSender;
 use App\Infrastructure\Sunat\GreenterSunatSender;
+use App\Listeners\RegisterAuditTrail;
 use App\Support\Tenants\TenantContext;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\ServiceProvider;

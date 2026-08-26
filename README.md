@@ -194,6 +194,38 @@ php artisan horizon
 php artisan l5-swagger:generate
 ```
 
+### Administracion y diagnostico
+
+```bash
+php artisan facturador:platform-admin admin@empresa.com
+php artisan facturador:api-key 20601234567
+php artisan facturador:diagnostico:cola
+php artisan facturador:storage:normalizar --dry-run
+```
+
+- `facturador:platform-admin` es la unica via para conceder el rol de
+  administrador del facturador. Anadir `--revoke` lo retira e invalida al
+  instante los tokens ya emitidos.
+- `facturador:api-key` emite una clave nueva para un tenant. Solo se guarda su
+  hash y se muestra una unica vez.
+- `facturador:storage:normalizar` mueve los comprobantes que quedaron en la
+  ruta duplicada `tenants/tenants/{ruc}` a `tenants/{ruc}`. Hasta ejecutarlo,
+  la aplicacion sigue leyendo de ambas ubicaciones.
+
+## Documentacion OpenAPI
+
+`/api/documentation` y `/docs` responden 404 fuera de `local` y `testing`.
+Para exponerlas en otro entorno, `L5_SWAGGER_PUBLIC=true`.
+
+## Administrador inicial
+
+`php artisan db:seed` solo crea un administrador en `local` y `testing`, con la
+contrasena de `FACTURADOR_SEED_ADMIN_PASSWORD` o una aleatoria que se imprime
+una vez. En produccion se da de alta con `facturador:platform-admin`.
+
+El rol vive en la columna `users.is_platform_admin`: dejar `tenant_id` vacio ya
+no concede permisos sobre todos los tenants.
+
 ## Notas de integracion SUNAT
 
 La clase `GreenterSunatSender` ya define el puerto de integracion para reemplazar el stub por envio real con:

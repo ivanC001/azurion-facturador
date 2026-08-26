@@ -15,7 +15,6 @@ final class ListDocumentosUseCase
      *   tipo_documento?: string|null,
      *   limit?: int|null
      * } $filters
-     *
      * @return array{
      *   total: int,
      *   items: array<int, array<string, mixed>>
@@ -34,8 +33,12 @@ final class ListDocumentosUseCase
         $this->applyTipoFilter($query, $filters['tipo_documento'] ?? null);
         $this->applySearchFilter($query, $filters['q'] ?? null);
 
-        $total = (clone $query)->count();
-        $rows = $query->limit($limit)->get();
+        // Se piden $limit + 1 filas: si vuelven menos, ya se conoce el total y
+        // se evita repetir todo el filtrado en un COUNT aparte, que es el caso
+        // habitual. Solo cuando hay mas paginas hace falta contar.
+        $rows = (clone $query)->limit($limit + 1)->get();
+        $total = $rows->count() > $limit ? $query->count() : $rows->count();
+        $rows = $rows->take($limit);
 
         return [
             'total' => $total,
@@ -44,7 +47,7 @@ final class ListDocumentosUseCase
     }
 
     /**
-     * @param array<int, string> $externalIds
+     * @param  array<int, string>  $externalIds
      */
     private function applyExternalIdsFilter(Builder $query, array $externalIds): void
     {
@@ -59,17 +62,24 @@ final class ListDocumentosUseCase
             return;
         }
 
-        $placeholders = implode(',', array_fill(0, count($ids), '?'));
-        $query->whereRaw("(payload->'documento'->>'external_id') IN ($placeholders)", $ids);
+        // Se filtra por la columna dedicada, que tiene indice unico, en vez de
+        // por la expresion JSON del payload.
+        $query->whereIn('external_id', $ids);
     }
 
+    /**
+     * Los estados se persisten siempre en mayusculas (DocumentStatus), asi que
+     * comparar la columna tal cual permite usar documentos_estado_id_idx.
+     * Envolverla en UPPER() descartaba el indice en cada listado.
+     */
     private function applyEstadoFilter(Builder $query, ?string $estado): void
     {
         $normalized = strtoupper(trim((string) $estado));
         if ($normalized === '') {
             return;
         }
-        $query->whereRaw('UPPER(COALESCE(estado, \'\')) = ?', [$normalized]);
+
+        $query->where('estado', $normalized);
     }
 
     private function applyTipoFilter(Builder $query, ?string $tipoDocumento): void
@@ -78,7 +88,8 @@ final class ListDocumentosUseCase
         if ($normalized === '') {
             return;
         }
-        $query->whereRaw('UPPER(COALESCE(tipo_documento, \'\')) = ?', [$normalized]);
+
+        $query->where('tipo_documento', $normalized);
     }
 
     private function applySearchFilter(Builder $query, ?string $search): void
@@ -88,9 +99,11 @@ final class ListDocumentosUseCase
             return;
         }
 
+        // Busqueda libre: no puede aprovechar indices por el comodin inicial,
+        // pero se ejecuta ya acotada al esquema del tenant.
         $like = '%'.$needle.'%';
         $query->where(function (Builder $inner) use ($like): void {
-            $inner->whereRaw("LOWER(COALESCE(payload->'documento'->>'external_id', '')) LIKE ?", [$like])
+            $inner->whereRaw("LOWER(COALESCE(external_id, '')) LIKE ?", [$like])
                 ->orWhereRaw("LOWER(COALESCE(serie, '')) LIKE ?", [$like])
                 ->orWhereRaw("LOWER(COALESCE(correlativo, '')) LIKE ?", [$like])
                 ->orWhereRaw("LOWER(COALESCE(estado, '')) LIKE ?", [$like])
@@ -104,7 +117,7 @@ final class ListDocumentosUseCase
      */
     private function toRow(Documento $documento): array
     {
-        $externalId = trim((string) data_get($documento->payload, 'documento.external_id', ''));
+        $externalId = trim((string) ($documento->external_id ?? data_get($documento->payload, 'documento.external_id', '')));
         $clienteNombre = (string) (data_get($documento->cliente, 'razon_social') ?? data_get($documento->cliente, 'nombre') ?? '');
         $clienteDocumento = (string) (data_get($documento->cliente, 'num_doc') ?? '');
 

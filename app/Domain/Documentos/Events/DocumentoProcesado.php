@@ -13,6 +13,5 @@ final class DocumentoProcesado
     public function __construct(
         public readonly int $documentoId,
         public readonly string $estado,
-    ) {
-    }
+    ) {}
 }

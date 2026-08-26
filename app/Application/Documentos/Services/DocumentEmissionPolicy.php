@@ -10,9 +10,7 @@ final class DocumentEmissionPolicy
 {
     private const ELECTRONIC_TYPES = ['01', '03', '07', '08', '09', 'RC'];
 
-    public function __construct(private readonly TenantContext $tenantContext)
-    {
-    }
+    public function __construct(private readonly TenantContext $tenantContext) {}
 
     public function assertAllowed(string $documentType): void
     {

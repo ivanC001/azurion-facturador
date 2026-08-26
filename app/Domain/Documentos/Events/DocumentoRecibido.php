@@ -10,7 +10,5 @@ final class DocumentoRecibido
     use Dispatchable;
     use SerializesModels;
 
-    public function __construct(public readonly int $documentoId)
-    {
-    }
+    public function __construct(public readonly int $documentoId) {}
 }

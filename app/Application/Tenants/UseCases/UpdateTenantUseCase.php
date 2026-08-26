@@ -2,8 +2,10 @@
 
 namespace App\Application\Tenants\UseCases;
 
+use App\Infrastructure\Tenant\TenantArtifactStorage;
 use App\Models\Tenant;
 use App\Support\Sunat\SunatEnvironment;
+use App\Support\Sunat\SunatTestIdentity;
 use App\Support\Tenants\TenantPrivateFileReference;
 use Greenter\XMLSecLibs\Certificate\X509Certificate;
 use Greenter\XMLSecLibs\Certificate\X509ContentType;
@@ -11,20 +13,26 @@ use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\ValidationException;
 
 final class UpdateTenantUseCase
 {
-    private const TEST_SOL_RUC = '20000000001';
-    private const TEST_SOL_USER = 'MODDATOS';
-    private const TEST_SOL_PASSWORD = 'moddatos';
+    private const TEST_SOL_RUC = SunatTestIdentity::RUC;
+
+    private const TEST_SOL_USER = SunatTestIdentity::USER;
+
+    private const TEST_SOL_PASSWORD = SunatTestIdentity::PASSWORD;
+
+    private const ALLOWED_LOGO_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp'];
+
+    public function __construct(private readonly TenantArtifactStorage $artifactStorage) {}
 
     public function execute(int $tenantId, array $payload): array
     {
         $tenant = Tenant::query()->findOrFail($tenantId);
         $schema = (string) $tenant->schema_name;
         $currentConfig = $this->readBillingConfig($schema);
+        $currentExternalTenantId = $tenant->external_tenant_id;
 
         $tenantChanges = [];
 
@@ -32,16 +40,19 @@ final class UpdateTenantUseCase
             $tenantChanges['sunat_mode'] = $payload['sunat_mode'];
         }
 
-        $targetSunatMode = (string) ($payload['sunat_mode'] ?? $tenant->sunat_mode ?: Tenant::SUNAT_MODE_DISABLED);
-        $configChanges = $this->buildConfigChanges($tenant->ruc, $payload, $targetSunatMode);
+        $targetSunatMode = (string) ($payload['sunat_mode'] ?? ($tenant->sunat_mode ?: Tenant::SUNAT_MODE_DISABLED));
 
+        // El orden importa: primero se valida por completo y solo despues se
+        // escribe. Antes el certificado y el logo se guardaban en disco dentro
+        // del propio "build", asi que una validacion fallida dejaba ficheros
+        // huerfanos con la clave privada del tenant.
         $this->assertProductionConfig(
             (string) $tenant->ruc,
             $targetSunatMode,
             $currentConfig,
             $payload,
-            $configChanges,
         );
+
         if ($targetSunatMode !== Tenant::SUNAT_MODE_DISABLED
             && strtoupper((string) ($payload['country_code'] ?? $tenant->country_code)) !== 'PE') {
             throw ValidationException::withMessages([
@@ -58,20 +69,9 @@ final class UpdateTenantUseCase
                 : Tenant::FISCAL_STATUS_ACTIVE;
         }
 
-        if ($tenantChanges !== []) {
-            $tenant->fill($tenantChanges)->save();
-        }
-
-        if ($configChanges !== [] && preg_match('/^[a-zA-Z0-9_]+$/', $schema)) {
-            DB::table($schema.'.configuracion_facturacion')->updateOrInsert(
-                ['id' => 1],
-                array_merge($configChanges, [
-                    'updated_at' => now(),
-                    'created_at' => now(),
-                ]),
-            );
-        }
-        $this->forgetTenantCache($tenant->id, $tenant->ruc);
+        $this->assertUsableSchema($schema);
+        $this->persistChanges($tenant, $schema, $payload, $targetSunatMode, $tenantChanges);
+        $this->forgetTenantCache($tenant, $currentExternalTenantId);
         $savedConfig = $this->readBillingConfig($schema);
         $environment = SunatEnvironment::describe((string) $tenant->sunat_mode);
         $usesTestData = (bool) $environment['usa_datos_prueba'];
@@ -102,7 +102,7 @@ final class UpdateTenantUseCase
                 'endpoint_guias' => $environment['endpoint_guias'],
                 'cola' => $environment['cola'],
                 'certificado_configurado' => $usesTestData
-                    ? is_file(storage_path('certificates/ejemplo123456789.pem'))
+                    ? SunatTestIdentity::certificateExists()
                     : TenantPrivateFileReference::isAvailable(
                         $tenant->ruc,
                         'certificados',
@@ -129,17 +129,88 @@ final class UpdateTenantUseCase
         ];
     }
 
-    private function forgetTenantCache(int $tenantId, string $ruc): void
-    {
-        Cache::forget('facturador:tenant:id:'.$tenantId);
-        Cache::forget('facturador:tenant:ruc:'.$ruc);
-        $tenant = Tenant::query()->find($tenantId);
-        if ($tenant?->external_tenant_id) {
-            Cache::forget('facturador:tenant:external:'.$tenant->external_tenant_id);
+    /**
+     * Escribe tenant, configuracion y ficheros como una sola unidad.
+     *
+     * Si algo falla se revierten los cambios en base de datos y se borran los
+     * ficheros recien subidos, para no dejar al tenant en production con
+     * credenciales a medio guardar.
+     *
+     * @param  array<string, mixed>  $payload
+     * @param  array<string, mixed>  $tenantChanges
+     */
+    private function persistChanges(
+        Tenant $tenant,
+        string $schema,
+        array $payload,
+        string $targetSunatMode,
+        array $tenantChanges,
+    ): void {
+        $writtenFiles = [];
+
+        try {
+            DB::transaction(function () use ($tenant, $schema, $payload, $targetSunatMode, $tenantChanges, &$writtenFiles): void {
+                $configChanges = array_merge(
+                    $this->buildConfigChanges($payload, $targetSunatMode),
+                    $this->storeUploadedFiles((string) $tenant->ruc, $payload, $targetSunatMode, $writtenFiles),
+                );
+
+                if ($tenantChanges !== []) {
+                    $tenant->fill($tenantChanges)->save();
+                }
+
+                if ($configChanges === []) {
+                    return;
+                }
+
+                DB::table($schema.'.configuracion_facturacion')->updateOrInsert(
+                    ['id' => 1],
+                    array_merge($configChanges, ['updated_at' => now()]),
+                );
+            });
+        } catch (\Throwable $exception) {
+            foreach ($writtenFiles as $path) {
+                $this->artifactStorage->disk()->delete($path);
+            }
+
+            throw $exception;
         }
     }
 
-    private function buildConfigChanges(string $tenantRuc, array $payload, string $targetSunatMode): array
+    /**
+     * Un esquema con nombre invalido no puede consultarse. Antes se descartaba
+     * en silencio y la API respondia 200 sin haber guardado nada.
+     */
+    private function assertUsableSchema(string $schema): void
+    {
+        if (preg_match('/^[a-zA-Z0-9_]+$/', $schema) !== 1) {
+            throw ValidationException::withMessages([
+                'schema' => ['El esquema del tenant no es valido; no se puede guardar la configuracion.'],
+            ]);
+        }
+    }
+
+    private function forgetTenantCache(Tenant $tenant, ?string $previousExternalTenantId): void
+    {
+        Cache::forget('facturador:tenant:id:'.$tenant->id);
+        Cache::forget('facturador:tenant:ruc:'.$tenant->ruc);
+
+        // Se purga tambien el identificador externo anterior: si cambio, su
+        // clave seguiria devolviendo el tenant con la configuracion vieja.
+        foreach ([$previousExternalTenantId, $tenant->external_tenant_id] as $externalId) {
+            if (is_string($externalId) && $externalId !== '') {
+                Cache::forget('facturador:tenant:external:'.$externalId);
+            }
+        }
+    }
+
+    /**
+     * Cambios escalares de configuracion. Sin efectos secundarios.
+     *
+     * @param  array<string, mixed>  $payload
+     * @return array<string, mixed>
+     */
+    private function buildConfigChanges(array $payload, string $targetSunatMode): array
     {
         $changes = [];
 
@@ -188,37 +259,95 @@ final class UpdateTenantUseCase
             }
         }
 
-        if (($payload['logo_file'] ?? null) instanceof UploadedFile) {
-            $ext = strtolower((string) $payload['logo_file']->getClientOriginalExtension());
-            $fileName = 'logo_'.now()->format('Ymd_His').'.'.$ext;
-            $relative = $tenantRuc.'/logos/'.$fileName;
-            Storage::disk(config('facturador.storage.disk', 'tenants'))->putFileAs($tenantRuc.'/logos', $payload['logo_file'], $fileName);
-            $changes['logo_pdf_url'] = $relative;
-        }
-
-        if ($acceptsProductionCredentials && ($payload['certificado_file'] ?? null) instanceof UploadedFile) {
-            $ext = strtolower((string) $payload['certificado_file']->getClientOriginalExtension());
-            $pemContent = null;
-
-            if (in_array($ext, ['pfx', 'p12'], true)) {
-                $password = (string) ($payload['certificado_password'] ?? '');
-                $certificate = new X509Certificate((string) $payload['certificado_file']->get(), $password);
-                $pemContent = (string) $certificate->export(X509ContentType::PEM);
-            } else {
-                $pemContent = (string) $payload['certificado_file']->get();
-            }
-
-            $fileName = 'cert_'.now()->format('Ymd_His').'.pem';
-            $relative = $tenantRuc.'/certificados/'.$fileName;
-            Storage::disk(config('facturador.storage.disk', 'tenants'))->put($relative, $pemContent);
-            $changes['certificado_url'] = $relative;
-            $changes['certificado_password'] = null;
-        } elseif ($acceptsProductionCredentials && array_key_exists('certificado_password', $payload)) {
+        if ($acceptsProductionCredentials && array_key_exists('certificado_password', $payload)) {
             // Nunca persistir la clave del contenedor PFX/P12.
             $changes['certificado_password'] = null;
         }
 
         return $changes;
+    }
+
+    /**
+     * Guarda logo y certificado y devuelve las referencias a persistir.
+     *
+     * @param  array<string, mixed>  $payload
+     * @param  list<string>  $writtenFiles  se rellena para poder deshacer
+     * @return array<string, mixed>
+     */
+    private function storeUploadedFiles(
+        string $tenantRuc,
+        array $payload,
+        string $targetSunatMode,
+        array &$writtenFiles,
+    ): array {
+        $changes = [];
+
+        if (($payload['logo_file'] ?? null) instanceof UploadedFile) {
+            $logo = $payload['logo_file'];
+            $fileName = 'logo_'.now()->format('Ymd_His').'.'.self::imageExtension($logo);
+            $relative = $tenantRuc.'/logos/'.$fileName;
+            $this->artifactStorage->putUploadedFile($tenantRuc.'/logos', $logo, $fileName);
+            $writtenFiles[] = $relative;
+            $changes['logo_pdf_url'] = $relative;
+        }
+
+        if ($targetSunatMode !== Tenant::SUNAT_MODE_PRODUCTION
+            || ! (($payload['certificado_file'] ?? null) instanceof UploadedFile)) {
+            return $changes;
+        }
+
+        $fileName = 'cert_'.now()->format('Ymd_His').'.pem';
+        $relative = $tenantRuc.'/certificados/'.$fileName;
+        $this->artifactStorage->put($relative, self::certificatePem($payload));
+        $writtenFiles[] = $relative;
+        $changes['certificado_url'] = $relative;
+        $changes['certificado_password'] = null;
+
+        return $changes;
+    }
+
+    /**
+     * Extension del logo derivada del contenido, no del nombre que envio el
+     * cliente. La validacion de la request ya limita los tipos aceptados.
+     */
+    private static function imageExtension(UploadedFile $file): string
+    {
+        $guessed = strtolower((string) $file->guessExtension());
+
+        return in_array($guessed, self::ALLOWED_LOGO_EXTENSIONS, true) ? $guessed : 'png';
+    }
+
+    /**
+     * Convierte el certificado subido a PEM.
+     *
+     * Una clave de contenedor incorrecta es un error del cliente, no un fallo
+     * del servidor: se traduce a un 422 con el campo concreto.
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    private static function certificatePem(array $payload): string
+    {
+        $file = $payload['certificado_file'];
+        $extension = strtolower((string) $file->getClientOriginalExtension());
+
+        if (! in_array($extension, ['pfx', 'p12'], true)) {
+            return (string) $file->get();
+        }
+
+        try {
+            $certificate = new X509Certificate(
+                (string) $file->get(),
+                (string) ($payload['certificado_password'] ?? ''),
+            );
+
+            return (string) $certificate->export(X509ContentType::PEM);
+        } catch (\Throwable) {
+            throw ValidationException::withMessages([
+                'certificado_password' => [
+                    'No se pudo abrir el certificado: revisa la clave del contenedor .pfx/.p12.',
+                ],
+            ]);
+        }
     }
 
     private function readBillingConfig(string $schema): ?object
@@ -235,26 +364,30 @@ final class UpdateTenantUseCase
     }
 
     /**
-     * @param array<string, mixed> $payload
-     * @param array<string, mixed> $configChanges
+     * @param  array<string, mixed>  $payload
      */
     private function assertProductionConfig(
         string $tenantRuc,
         string $targetSunatMode,
         ?object $currentConfig,
         array $payload,
-        array $configChanges,
     ): void {
-        if ($targetSunatMode !== 'production') {
+        if ($targetSunatMode !== Tenant::SUNAT_MODE_PRODUCTION) {
             return;
         }
 
-        $rucSol = trim((string) ($configChanges['ruc_sol'] ?? ($currentConfig->ruc_sol ?? '')));
-        $usuarioSol = trim((string) ($configChanges['usuario_sol'] ?? ($currentConfig->usuario_sol ?? '')));
+        $rucSol = trim((string) ($payload['ruc_sol'] ?? ($currentConfig->ruc_sol ?? '')));
+        $usuarioSol = trim((string) ($payload['usuario_sol'] ?? ($currentConfig->usuario_sol ?? '')));
         $claveSol = array_key_exists('clave_sol', $payload)
             ? trim((string) $payload['clave_sol'])
             : $this->decryptStoredPassword($currentConfig->clave_sol_encrypted ?? null);
-        $certificateRef = trim((string) ($configChanges['certificado_url'] ?? ($currentConfig->certificado_url ?? '')));
+
+        // Con un certificado adjunto la validacion se resuelve sobre el propio
+        // fichero; sin el, sobre el que ya estuviera guardado.
+        $uploadedCertificate = ($payload['certificado_file'] ?? null) instanceof UploadedFile
+            ? $payload['certificado_file']
+            : null;
+        $certificateRef = trim((string) ($currentConfig->certificado_url ?? ''));
 
         $messages = [];
 
@@ -276,7 +409,11 @@ final class UpdateTenantUseCase
             $messages['clave_sol'] = ['No puedes usar la clave SOL de prueba en modo production.'];
         }
 
-        if ($certificateRef === ''
+        if ($uploadedCertificate !== null) {
+            if ($this->isTestCertificateRef((string) $uploadedCertificate->getClientOriginalName())) {
+                $messages['certificado_file'] = ['No puedes usar el certificado de prueba en modo production.'];
+            }
+        } elseif ($certificateRef === ''
             || ! TenantPrivateFileReference::isAvailable($tenantRuc, 'certificados', $certificateRef)) {
             $messages['certificado_file'] = ['En modo production debes cargar o conservar un certificado real (.pem, .pfx o .p12).'];
         } elseif ($this->isTestCertificateRef($certificateRef)) {
@@ -303,10 +440,7 @@ final class UpdateTenantUseCase
 
     private function isTestCertificateRef(string $certificateRef): bool
     {
-        $normalized = strtolower(str_replace('\\', '/', $certificateRef));
-
-        return str_contains($normalized, 'cert_test')
-            || str_contains($normalized, 'ejemplo123456789');
+        return SunatTestIdentity::isTestCertificateReference($certificateRef);
     }
 
     /** @return list<array<string, string>> */
@@ -318,5 +452,4 @@ final class UpdateTenantUseCase
 
         return is_array($value) ? array_values($value) : [];
     }
-
 }

@@ -5,6 +5,7 @@ namespace Tests\Unit;
 use App\Application\Integrations\Azurion\AzurionVentaStatusNotifier;
 use App\Domain\Documentos\Contracts\DocumentoRepository;
 use App\Domain\Sunat\Contracts\SunatSender;
+use App\Infrastructure\Tenant\TenantArtifactStorage;
 use App\Infrastructure\Tenant\TenantStoragePathResolver;
 use App\Jobs\ProcessSunatBetaDocumentJob;
 use App\Models\Documento;
@@ -49,7 +50,7 @@ final class SunatJobTenantIdentityTest extends TestCase
             'fiscal_status' => Tenant::FISCAL_STATUS_ACTIVE,
             'is_active' => true,
         ]);
-        $context = new TenantContext();
+        $context = new TenantContext;
         $assertIdentity = function () use ($context, $tenant): void {
             $identity = $context->required();
             $this->assertSame($tenant->id, $identity->tenantId);
@@ -70,10 +71,11 @@ final class SunatJobTenantIdentityTest extends TestCase
         try {
             $job->handle(
                 new IdentityInspectingDocumentoRepository($assertIdentity),
-                new NoopSunatSender(),
+                new NoopSunatSender,
                 new TenantStoragePathResolver($context),
                 $context,
-                new AzurionVentaStatusNotifier(),
+                new AzurionVentaStatusNotifier,
+                app(TenantArtifactStorage::class),
             );
             $this->fail('The inspecting repository must stop the job.');
         } catch (RuntimeException $exception) {
@@ -86,9 +88,7 @@ final class SunatJobTenantIdentityTest extends TestCase
 
 final class IdentityInspectingDocumentoRepository implements DocumentoRepository
 {
-    public function __construct(private readonly Closure $assertIdentity)
-    {
-    }
+    public function __construct(private readonly Closure $assertIdentity) {}
 
     public function create(array $payload): Documento
     {
@@ -102,13 +102,9 @@ final class IdentityInspectingDocumentoRepository implements DocumentoRepository
         throw new RuntimeException('Not used.');
     }
 
-    public function markProcessing(Documento $documento): void
-    {
-    }
+    public function markProcessing(Documento $documento): void {}
 
-    public function markResult(Documento $documento, string $estado, ?string $ticket = null, ?string $hash = null): void
-    {
-    }
+    public function markResult(Documento $documento, string $estado, ?string $ticket = null, ?string $hash = null): void {}
 }
 
 final class NoopSunatSender implements SunatSender

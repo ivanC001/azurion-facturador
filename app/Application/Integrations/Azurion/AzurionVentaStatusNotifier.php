@@ -3,9 +3,9 @@
 namespace App\Application\Integrations\Azurion;
 
 use App\Models\Documento;
+use App\Support\Documentos\SignedArtifactUrl;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\URL;
 use Illuminate\Support\Str;
 
 final class AzurionVentaStatusNotifier
@@ -44,6 +44,7 @@ final class AzurionVentaStatusNotifier
                 Log::warning('No se pudo serializar payload callback AZURION.', [
                     'documento_id' => $documento->id,
                 ]);
+
                 return false;
             }
 
@@ -85,8 +86,11 @@ final class AzurionVentaStatusNotifier
                 Log::warning('Callback AZURION respondio con error.', [
                     'documento_id' => $documento->id,
                     'status' => $response->status(),
-                    'response' => $response->body(),
+                    // Solo un extracto: el cuerpo completo puede arrastrar datos
+                    // del ERP hacia los logs del facturador.
+                    'response' => Str::limit($response->body(), 500),
                 ]);
+
                 return false;
             }
 
@@ -96,6 +100,7 @@ final class AzurionVentaStatusNotifier
                 'documento_id' => $documento->id,
                 'error' => $exception->getMessage(),
             ]);
+
             return false;
         }
     }
@@ -167,11 +172,7 @@ final class AzurionVentaStatusNotifier
 
     private function signedArtifactUrl(string $routeName, int $documentId, string $tenantRuc): string
     {
-        return URL::temporarySignedRoute(
-            $routeName,
-            now()->addMinutes(max(5, (int) config('facturador.artifacts.signed_url_ttl_minutes', 30))),
-            ['id' => $documentId, 'tenant_ruc' => $tenantRuc],
-        );
+        return SignedArtifactUrl::for($routeName, $documentId, $tenantRuc);
     }
 
     private function resolveRequestUri(string $callbackUrl): string

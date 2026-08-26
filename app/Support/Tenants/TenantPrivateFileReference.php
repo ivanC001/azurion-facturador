@@ -2,7 +2,8 @@
 
 namespace App\Support\Tenants;
 
-use Illuminate\Support\Facades\Storage;
+use App\Infrastructure\Tenant\TenantArtifactStorage;
+use App\Support\Sunat\SunatTestIdentity;
 
 final class TenantPrivateFileReference
 {
@@ -30,30 +31,39 @@ final class TenantPrivateFileReference
     {
         $path = self::safeKey($tenantRuc, $directory, $reference);
 
-        return $path !== null && Storage::disk(config('facturador.storage.disk', 'tenants'))->exists($path);
+        return $path !== null && self::storage()->exists($path);
     }
 
     public static function isProductionCertificateAvailable(string $tenantRuc, mixed $reference): bool
     {
         $path = self::safeKey($tenantRuc, 'certificados', $reference);
-        if ($path === null || ! Storage::disk(config('facturador.storage.disk', 'tenants'))->exists($path)) {
+        if ($path === null) {
             return false;
         }
 
-        $normalized = strtolower($path);
-        if (str_contains($normalized, 'cert_test') || str_contains($normalized, 'ejemplo123456789')) {
+        $contents = self::storage()->get($path);
+        if ($contents === null) {
             return false;
         }
 
-        $testCertificate = storage_path('certificates/ejemplo123456789.pem');
-        if (is_file($testCertificate)) {
-            $storedHash = hash('sha256', (string) Storage::disk(config('facturador.storage.disk', 'tenants'))->get($path));
-            $testHash = hash_file('sha256', $testCertificate);
-            if (is_string($testHash) && hash_equals($testHash, $storedHash)) {
+        if (SunatTestIdentity::isTestCertificateReference($path)) {
+            return false;
+        }
+
+        // Un certificado de prueba renombrado sigue siendo de prueba: se
+        // compara el contenido, no solo el nombre del fichero.
+        if (SunatTestIdentity::certificateExists()) {
+            $testHash = hash_file('sha256', SunatTestIdentity::certificatePath());
+            if (is_string($testHash) && hash_equals($testHash, hash('sha256', $contents))) {
                 return false;
             }
         }
 
         return true;
+    }
+
+    private static function storage(): TenantArtifactStorage
+    {
+        return app(TenantArtifactStorage::class);
     }
 }

@@ -2,14 +2,12 @@
 
 namespace Tests\Unit;
 
-use App\Domain\Pdf\Contracts\DocumentPdfGenerator;
-use App\Infrastructure\Sunat\GreenterSunatSender;
+use App\Infrastructure\Sunat\SunatEmissionConfigResolver;
+use App\Infrastructure\Tenant\TenantArtifactStorage;
 use App\Infrastructure\Tenant\TenantSchemaManager;
-use App\Support\Tenants\TenantContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
-use ReflectionMethod;
 use Tests\TestCase;
 
 final class GreenterSunatSenderEnvironmentTest extends TestCase
@@ -30,18 +28,10 @@ final class GreenterSunatSenderEnvironmentTest extends TestCase
             'modo_sunat' => 'beta',
         ]);
 
-        $sender = new GreenterSunatSender(
-            new TenantContext(),
-            new class implements DocumentPdfGenerator {
-                public function generate(array $context): string
-                {
-                    return '';
-                }
-            },
-        );
-
-        $method = new ReflectionMethod($sender, 'resolveConfig');
-        $config = $method->invoke($sender, [], '20612345678', 'beta', '03');
+        // La resolucion de credenciales vive ahora en su propia clase, asi que
+        // se prueba directamente en lugar de por reflexion sobre el emisor.
+        $config = (new SunatEmissionConfigResolver(app(TenantArtifactStorage::class)))
+            ->resolve('20612345678', 'beta', '03');
 
         $this->assertSame('beta', $config['mode']);
         $this->assertSame('https://e-beta.sunat.gob.pe/ol-ti-itcpfegem-beta/billService', $config['service']);

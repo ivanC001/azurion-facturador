@@ -147,7 +147,7 @@ final class SaveSucursalUseCase
     }
 
     /**
-     * @param array<int, array<string, mixed>> $overrides
+     * @param  array<int, array<string, mixed>>  $overrides
      * @return array<int, array<string, mixed>>
      */
     private function buildInitialSeries(int $sucursalNumber, array $overrides): array

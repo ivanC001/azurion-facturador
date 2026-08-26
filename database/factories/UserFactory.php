@@ -30,6 +30,7 @@ class UserFactory extends Factory
             'email_verified_at' => now(),
             'password' => static::$password ??= Hash::make('password'),
             'remember_token' => Str::random(10),
+            'is_platform_admin' => false,
         ];
     }
 
@@ -40,6 +41,20 @@ class UserFactory extends Factory
     {
         return $this->state(fn (array $attributes) => [
             'email_verified_at' => null,
+        ]);
+    }
+
+    /**
+     * Administrador del facturador: opera sobre todos los tenants.
+     *
+     * Es un estado explicito a proposito. El privilegio nunca debe salir de
+     * omitir tenant_id, porque eso lo concede por descuido.
+     */
+    public function platformAdmin(): static
+    {
+        return $this->state(fn (array $attributes) => [
+            'tenant_id' => null,
+            'is_platform_admin' => true,
         ]);
     }
 }

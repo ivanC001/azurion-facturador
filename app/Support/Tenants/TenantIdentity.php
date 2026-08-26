@@ -12,6 +12,5 @@ final class TenantIdentity
         public readonly string $countryCode,
         public readonly string $documentMode,
         public readonly string $fiscalStatus,
-    ) {
-    }
+    ) {}
 }

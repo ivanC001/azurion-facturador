@@ -3,6 +3,7 @@
 namespace App\Http\Middleware;
 
 use App\Models\ApiClient;
+use App\Models\User;
 use App\Security\ApiHmacRequestVerifier;
 use Closure;
 use Illuminate\Http\Request;
@@ -117,6 +118,17 @@ final class ApiAuthenticationMiddleware
             }
 
             if ((bool) config('facturador.security.hmac.required_with_api_key', true)) {
+                // La proteccion anti-replay se apoya en el nonce cacheado. Con
+                // un store por proceso (array o file) cada worker tiene su
+                // propia lista y el replay pasa, asi que se exige un store
+                // compartido tambien en esta ruta, no solo en la de Azurion.
+                if (! $this->hasSharedReplayStore()) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Shared replay protection is not configured.',
+                    ], 503);
+                }
+
                 $hmacError = $this->hmacRequestVerifier->verify($request, $apiKey, (int) $client->id);
 
                 if ($hmacError !== null) {
@@ -151,9 +163,11 @@ final class ApiAuthenticationMiddleware
             $request->attributes->set('auth_mode', 'jwt');
             $request->attributes->set('tenant_id', $payload->get('tenant_id'));
             $request->attributes->set('auth_user_id', $user->getAuthIdentifier());
+            // El claim solo se acepta si el usuario sigue siendo administrador:
+            // asi, revocar el rol invalida de inmediato los tokens ya emitidos.
             $request->attributes->set(
                 'facturador_platform_admin',
-                (bool) ($payload->get('facturador_platform_admin') ?? ($user->tenant_id === null)),
+                $user instanceof User && $user->isPlatformAdmin(),
             );
 
             return $next($request);

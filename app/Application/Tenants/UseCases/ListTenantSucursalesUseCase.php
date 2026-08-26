@@ -8,9 +8,7 @@ use Illuminate\Support\Facades\DB;
 
 final class ListTenantSucursalesUseCase
 {
-    public function __construct(private readonly TenantSchemaManager $tenantSchemaManager)
-    {
-    }
+    public function __construct(private readonly TenantSchemaManager $tenantSchemaManager) {}
 
     public function execute(int $tenantId): array
     {
@@ -75,4 +73,3 @@ final class ListTenantSucursalesUseCase
         ];
     }
 }
-

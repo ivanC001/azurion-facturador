@@ -2,8 +2,6 @@
 
 namespace App\Support\Tenants;
 
-use App\Support\Tenants\TenantIdentity;
-
 final class TenantContext
 {
     private ?TenantIdentity $tenant = null;

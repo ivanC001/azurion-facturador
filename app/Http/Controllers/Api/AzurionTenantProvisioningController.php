@@ -11,8 +11,7 @@ final class AzurionTenantProvisioningController
 {
     public function __construct(
         private readonly ProvisionTenantFromAzurionUseCase $provisionTenantFromAzurionUseCase,
-    ) {
-    }
+    ) {}
 
     public function upsert(Request $request, string $externalTenantId): JsonResponse
     {

@@ -60,7 +60,7 @@ final class DocumentEmissionPolicyTest extends TestCase
         string $fiscalStatus,
         string $sunatMode,
     ): DocumentEmissionPolicy {
-        $context = new TenantContext();
+        $context = new TenantContext;
         $context->set(new TenantIdentity(
             tenantId: 1,
             ruc: 'TAX-001',
